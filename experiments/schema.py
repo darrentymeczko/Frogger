@@ -29,6 +29,7 @@ from .model import (
     STATISTICAL_TESTS,
     Condition,
     Experiment,
+    OrderSlot,
     Statistics,
     StrainGroup,
 )
@@ -148,9 +149,28 @@ def statistics_from_dict(raw: dict, path: str) -> Statistics:
     )
 
 
+def order_to_list(order) -> list[dict]:
+    return [{"plate": s.plate, **({"group": s.group} if s.group is not None else {})}
+            for s in order]
+
+
+def order_from_list(raw: list, path: str) -> tuple[OrderSlot, ...]:
+    slots = []
+    for i, item in enumerate(raw):
+        where = f"{path}[{i}]"
+        if not isinstance(item, dict):
+            raise ExperimentError(f"{where}: expected an object, got {type(item).__name__}")
+        plate = _get(item, "plate", where, int)
+        if isinstance(plate, bool) or plate < 1:
+            raise ExperimentError(f"{where}.plate: plate numbers start at 1")
+        group = _get(item, "group", where, str, default=None)
+        slots.append(OrderSlot(plate, group))
+    return tuple(slots)
+
+
 def to_dict(e: Experiment) -> dict:
     d: dict = {
-        "schema_version": max(e.schema_version, SCHEMA_VERSION) if (e.strain_groups or e.multi_step.enabled) else e.schema_version,
+        "schema_version": max(e.schema_version, SCHEMA_VERSION) if (e.strain_groups or e.multi_step.enabled or e.photo_order) else e.schema_version,
         "kind": KIND,
         "id": e.id,
         "revision": e.revision,
@@ -184,6 +204,8 @@ def to_dict(e: Experiment) -> dict:
     }
     if e.set_key is not None:
         photos["set_key"] = e.set_key
+    if e.photo_order:
+        photos["order"] = order_to_list(e.photo_order)
     if e.picks:
         photos["picks"] = {
             code: dict(sorted(slots.items()))
@@ -333,6 +355,8 @@ def from_dict(d: dict) -> Experiment:
         set_key=_get(photos, "set_key", "$.photos", str, default=None),
         strain_groups=groups,
         profile=profile,
+        photo_order=order_from_list(
+            _get(photos, "order", "$.photos", list, default=[]), "$.photos.order"),
         picks=picks,
         overrides=overrides,
         ignored=[str(p) for p in _get(photos, "ignored", "$.photos", list, default=[])],

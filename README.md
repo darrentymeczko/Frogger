@@ -110,6 +110,19 @@ by experiment/group name and uses their saved photo assignments and controls;
 groups are never pooled. Version-1 experiment files still open; new files use
 version 2 so older designers cannot silently ignore their strain groups.
 
+**Photos in a fixed order.** Some benches photograph several strain sets at once
+and keep every photo of one medium, time and treatment in one folder, always in
+the same order. For example: set A plate 1 (replicates 1+2), set A plate 2
+(replicates 3+4), set B plate 1, and so on. On **Data**, click **Photo order in
+each folder...**, list the strain groups and plates in the order they were
+photographed (add groups there too), and check the table against one of your
+folders. Each photo's strain group and plate then come from its position in its
+folder, counted in filename order as Explorer lists it. Photos marked **Ignore**
+are skipped when counting. The same order applies to folders added later. A
+folder with more or fewer photos than the order lists is not guessed at: its
+photos are marked in the table. Ignore the extra shot, or assign those photos by
+hand. Hand corrections always win over the order.
+
 Each detail has one dropdown combining where to look and how to read the name,
 for example, “Read hours from the ‘16 Hours, 18 Hours’ folders.” Choices include
 names from your own data and show the values they would read before you apply them.

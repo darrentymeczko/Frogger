@@ -52,6 +52,28 @@ and uses the saved photo paths and metadata when rebuilding, including manual
 assignments; it never re-infers a group's membership from folder names. Old
 results without saved assignments retain their original discovery behaviour.
 
+## Photos in a fixed order
+
+Some benches photograph several strain sets at one sitting. Every photo of one
+medium/time/treatment goes in one folder, always in the same order, for example
+set A plate 1 (reps 1+2), set A plate 2 (reps 3+4), set B plate 1, and so on.
+Nothing in the names identifies the plate, so the inference never guesses it.
+The user states the order once with **Photo order in each folder...** on Data.
+The order is a list of (strain group, plate) positions saved as
+`photos.order` (schema version 4). The dialog builds it from the strain group
+and template plate order, with either every plate of one group first or plate 1
+of every group first, and previews it against a real folder.
+
+`intake.resolve` then assigns the Nth photo of each folder to position N.
+Photos are counted in natural filename order, and ignored photos are skipped.
+Precedence is ignored > per-photo corrections > photo order > naming profile.
+While an order is set, it is the only automatic source of plate and of strain
+group (when its positions name groups). A folder whose photo count differs from
+the order is never shifted to fit. Its photos stay unresolved with a note, and
+the `photo_order_mismatch` warning lists the folder. Ignoring an extra shot, or
+assigning the photos by hand, resolves it. Single-panel orders without strain
+groups cover unlabelled `R1+2`/`R3+4` photos the same way.
+
 ## Patterns represented in the listing
 
 | Organization / example | Current handling | Review or future work |
@@ -64,7 +86,8 @@ results without saved assignments retain their original discovery behaviour.
 | 30C SD 2mM ZnSO4 r1+2.JPG | Dose and temperature retained in label | `r1+2` is not automatically a plate number. |
 | Glucose P1 17h.JPG | Explicit plate and hours in filename | A whole-relative-path rule supports varying nesting depth. Conflicting explicit values stay unresolved. |
 | Morning, later, next day, dated sessions | Session/date labels do not establish elapsed hours | Future: user-supplied spotting datetime plus confirmed capture times; timezone and missing-year handling. |
-| 1a/1b, 1.1/1.2, R1+2/R3+4, #1/#2 | No implicit template plate mapping | Future: an explicit replicate-group-to-template-plate mapping editor with preview. |
+| 1a/1b, 1.1/1.2, R1+2/R3+4, #1/#2 | No implicit template plate mapping | A photo order maps folder positions to template plates when every folder follows one order. Future: a label-to-plate mapping editor for names that vary. |
+| Several strain sets photographed into one folder, in a fixed order | Photo order in each folder (strain group + plate per position) | Folders with a different photo count are flagged, never shifted. |
 | C Glu 30C 21H with Met+/Met- photos | Explicit hours and treatment text suggested; signs retained | Letter-coded panels and nutrient signs need user confirmation; future factor/panel vocabulary mappings. |
 | Nested owner/project/date/treatment folders | Root-relative scanning, structural rules and per-photo edits | Choose one experiment root; unlabeled strain panels cannot be safely inferred across an entire lab archive. |
 | Typos and abbreviations (rad/radicicol, glycerl/glycerol) | Kept distinct unless a known alias applies | Future: proposed alias merges with example paths and explicit acceptance, never automatic fuzzy pooling. |

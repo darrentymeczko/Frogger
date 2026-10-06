@@ -516,7 +516,7 @@ def _check_photos(e: Experiment, out: list[Issue]) -> None:
         )
 
     profile: NamingProfile = e.profile
-    have = profile.facets()
+    have = profile.facets() | set(e.order_facets())
     missing = [f for f in REQUIRED_FACETS.get(e.mode, ()) if f not in have]
     if missing:
         why = (
@@ -539,6 +539,50 @@ def _check_photos(e: Experiment, out: list[Issue]) -> None:
         out.append(
             Issue(Severity.ERROR, "profile_invalid", f"naming profile: {exc}")
         )
+
+
+def _check_order(e: Experiment, template, out: list[Issue]) -> None:
+    """The photo order must name real groups and plates, each exactly once.
+
+    Checked once for the whole experiment, not per strain group: one order
+    spans every group in a folder.
+    """
+    order = e.photo_order
+    if not order:
+        return
+    named = [s.group for s in order if s.group is not None]
+    if named and len(named) != len(order):
+        out.append(Issue(Severity.ERROR, "photo_order_groups",
+                         "the photo order names a strain group for some "
+                         "positions but not others; give every position one"))
+    unknown = sorted(set(named) - set(e.strain_groups))
+    if unknown:
+        out.append(Issue(Severity.ERROR, "photo_order_groups",
+                         f"the photo order uses {', '.join(map(repr, unknown))}, "
+                         f"which {_plural(len(unknown), 'is', 'are')} not a "
+                         f"defined strain group"))
+    elif named:
+        absent = [k for k in e.strain_groups if k not in set(named)]
+        if absent:
+            out.append(Issue(Severity.WARNING, "photo_order_groups",
+                             f"strain group {', '.join(map(repr, absent))} "
+                             f"{_plural(len(absent), 'is', 'are')} not in the "
+                             f"photo order; assign those photos by hand"))
+    seen: set = set()
+    for slot in order:
+        if slot in seen:
+            where = f"{slot.group} plate {slot.plate}" if slot.group else f"plate {slot.plate}"
+            out.append(Issue(Severity.ERROR, "photo_order_duplicate",
+                             f"the photo order lists {where} more than once"))
+        seen.add(slot)
+    if template is not None and template.plates:
+        plates = {str(p.id) for p in template.plates}
+        stray = sorted({s.plate for s in order if str(s.plate) not in plates})
+        if stray:
+            out.append(Issue(Severity.ERROR, "photo_order_plate",
+                             f"the photo order uses plate "
+                             f"{', '.join(map(str, stray))}, which the plate "
+                             f"template does not have"))
 
 
 # ---------------------------------------------------------------------------
@@ -589,12 +633,20 @@ def validate(e: Experiment, template=None) -> list[Issue]:
     to, or None when it could not be loaded. It is passed in rather than read
     from disk so this stays pure and testable.
     """
+    issues: list[Issue] = []
+    _check_order(e, template, issues)
     if e.strain_groups:
         from dataclasses import replace
-        return sorted((replace(i, message=f"Strain group {key!r}: {i.message}")
-                       for key in e.strain_groups
-                       for i in validate(e.for_group(key), template)),
-                      key=lambda i: (_RANK[i.severity], i.condition or "", i.code))
+        issues.extend(replace(i, message=f"Strain group {key!r}: {i.message}")
+                      for key in e.strain_groups
+                      for i in _validate_panel(e.for_group(key), template))
+        return sorted(issues, key=lambda i: (_RANK[i.severity], i.condition or "", i.code))
+    return sorted(issues + _validate_panel(e, template),
+                  key=lambda i: (_RANK[i.severity], i.condition or "", i.code))
+
+
+def _validate_panel(e: Experiment, template) -> list[Issue]:
+    """Everything `validate` checks that belongs to one strain panel."""
     issues: list[Issue] = []
     _check_panel(e, issues)
     _check_controls(e, issues)

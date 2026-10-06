@@ -10,6 +10,7 @@ from uikit import tokens
 
 from ..profiles import FACETS, FacetRule, NamingProfile
 from .conditions import _ask_text
+from .order import order_summary
 from .organization import example_text, reading_choices
 
 _SOURCES = {
@@ -21,6 +22,7 @@ _SOURCES = {
 }
 _TRANSFORMS = {"condition": "code", "plate": "int", "timepoint": "hours", "set": "raw"}
 _MULTIPLE_GROUPS = "Multiple strain groups - assign photos below"
+_BY_ORDER = "By position in each folder (photo order)"
 
 
 class DataPanel(ttk.Frame):
@@ -66,6 +68,10 @@ class DataPanel(ttk.Frame):
         ttk.Button(actions, text="Use these choices", command=self._apply_choices).pack(side="left")
         ttk.Label(actions, text="Updates the photo list below; individual corrections are kept.",
                   foreground=tokens.TEXT_MUTED).pack(side="left", padx=8)
+        # For folders whose photos say nothing, but are always taken in the
+        # same order: set A plate 1, set A plate 2, set B plate 1, ...
+        ttk.Button(actions, text="Photo order in each folder...",
+                   command=self._edit_order).pack(side="right")
         self.advanced_button = ttk.Button(self.organization, text="Show advanced pattern editor",
                                          command=self._toggle_advanced)
         self.advanced_button.pack(anchor="w", pady=(6, 0))
@@ -131,8 +137,18 @@ class DataPanel(ttk.Frame):
             self.advanced_button.configure(text="Hide advanced pattern editor")
 
     def _refresh_choices(self):
+        by_order = self.ctl.experiment.order_facets()
         for facet, fields in self.simple_rules.items():
             current = self.ctl.experiment.profile.rule_for(facet)
+            if facet in by_order:
+                # The photo order is the authority; keep the shadowed rule as
+                # it is, so stopping the order brings the old reading back.
+                fields["choices"] = {_BY_ORDER: current}
+                fields["choice_box"].configure(values=[_BY_ORDER], state="disabled")
+                fields["selected"].set(_BY_ORDER)
+                self._preview_choice(facet)
+                continue
+            fields["choice_box"].configure(state="readonly")
             choices = reading_choices(self.ctl.files, facet, current,
                                       self.ctl.experiment.profile.aliases)
             if facet == "set":
@@ -152,11 +168,19 @@ class DataPanel(ttk.Frame):
 
     def _preview_choice(self, facet):
         fields = self.simple_rules[facet]
+        if fields["selected"].get() == _BY_ORDER:
+            fields["example"].configure(
+                text=order_summary(self.ctl.experiment, self.ctl.resolution)
+                if facet == "plate" else "Read with the plate number, from the photo order above.")
+            return
         if facet == "set" and fields["selected"].get() == _MULTIPLE_GROUPS:
             fields["example"].configure(text="Define each group on Panel, then select photos below and click Strain group to assign them.")
             return
-        fields["example"].configure(text=example_text(
-            self.ctl.files, self._choice_rule(facet), self.ctl.experiment.profile.aliases))
+        text = example_text(self.ctl.files, self._choice_rule(facet),
+                            self.ctl.experiment.profile.aliases)
+        if facet == "plate" and self._choice_rule(facet) is None and self.ctl.files:
+            text += " If every folder's photos are taken in the same order, use Photo order in each folder."
+        fields["example"].configure(text=text)
 
     def _apply_choices(self):
         with self.ctl.transaction("Change data organization"):
@@ -181,11 +205,16 @@ class DataPanel(ttk.Frame):
     def refresh(self):
         from ..profiles import profile_to_dict
         profile = self.ctl.experiment.profile
-        signature = {**profile_to_dict(profile), "groups": list(self.ctl.experiment.strain_groups)}
+        signature = {**profile_to_dict(profile), "groups": list(self.ctl.experiment.strain_groups),
+                     "order": list(self.ctl.experiment.photo_order)}
         files_signature = tuple(f.relpath for f in self.ctl.files)
         if signature != self._profile or files_signature != self._files_signature:
             self._refresh_choices()
             self._files_signature = files_signature
+        elif self.ctl.experiment.photo_order:
+            # Ignoring a photo can make a folder fit the order again.
+            for facet in self.ctl.experiment.order_facets():
+                self._preview_choice(facet)
         if signature != self._profile:
             self._profile = signature
             for facet, (source, depth, pattern) in self.rules.items():
@@ -197,8 +226,13 @@ class DataPanel(ttk.Frame):
         y = self.table.yview()[0]
         self.table.delete(*self.table.get_children())
         rows = self.ctl.resolution.rows if self.ctl.resolution else []
-        for row in rows:
+        # Listed as Explorer lists them (IMG_9 before IMG_10), which is also
+        # the order a photo order counts positions in.
+        from ..intake import _natural_key
+        for row in sorted(rows, key=lambda r: (_natural_key(r.relpath), r.relpath)):
             status = ", ".join(f"needs {v}" for v in row.missing) if row.status == "unresolved" else row.status
+            if row.note:
+                status += f" ({row.note})"
             if row.cloud_only:
                 status += "; cloud only"
             name = (self.ctl.condition_name(row.condition)
@@ -219,6 +253,10 @@ class DataPanel(ttk.Frame):
     def _detect(self):
         self.ctl.detect_organization()
         self.on_change()
+
+    def _edit_order(self):
+        from .order import edit_photo_order
+        edit_photo_order(self, self.ctl, self.on_change)
 
     def _adopt(self):
         self.ctl.adopt_found_conditions()

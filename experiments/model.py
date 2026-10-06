@@ -26,9 +26,10 @@ from dataclasses import dataclass, field, replace
 
 from .profiles import NamingProfile
 
-# Version 2 adds strain groups; version 3 adds optional multi-step settings.
-# Older designers must refuse newer files rather than silently omit analyses.
-SCHEMA_VERSION = 3
+# Version 2 adds strain groups; version 3 adds optional multi-step settings;
+# version 4 adds an optional photo order. Older designers must refuse newer
+# files rather than silently omit analyses.
+SCHEMA_VERSION = 4
 KIND = "spotting_experiment"
 
 #: Handpicked photos the user has already chosen, quantified once.
@@ -151,6 +152,21 @@ class Condition:
         return self.label or self.code
 
 
+@dataclass(frozen=True)
+class OrderSlot:
+    """One position in a folder's fixed photo order: which plate it shows.
+
+    Some benches photograph every panel of a sitting into one folder, always in
+    the same order -- set A plate 1, set A plate 2, set B plate 1, ... -- and
+    nothing in the filenames says which is which. The position does.
+    """
+
+    plate: int
+    #: Strain group key, or None when the experiment has one panel (or reads
+    #: its strain group from names instead).
+    group: str | None = None
+
+
 @dataclass
 class StrainGroup:
     """A separately labelled panel sharing the experiment's plate geometry."""
@@ -193,6 +209,11 @@ class Experiment:
     #: conditions; TIMECOURSE also requires plate and timepoint identities.
     #: QUANTIFY still chooses photos by eye and does not require a profile.
     profile: NamingProfile = field(default_factory=NamingProfile)
+    #: When set, the Nth photo in every folder (natural filename order, ignored
+    #: photos skipped) is `photo_order[N]`. It is then the only automatic source
+    #: of plate -- and of strain group, when its slots name groups. A folder
+    #: holding a different number of photos is left unassigned, never guessed.
+    photo_order: tuple[OrderSlot, ...] = ()
     #: QUANTIFY only: condition code -> plate id -> relpath. The photograph the
     #: user picked for each plate of each condition, stated outright rather than
     #: derived from a filename.
@@ -233,6 +254,14 @@ class Experiment:
     @property
     def is_timecourse(self) -> bool:
         return self.mode == TIMECOURSE
+
+    def order_facets(self) -> tuple[str, ...]:
+        """What the photo order assigns: plate, and strain group if it names any."""
+        if not self.photo_order:
+            return ()
+        if any(slot.group is not None for slot in self.photo_order):
+            return ("plate", "set")
+        return ("plate",)
 
     def strain(self, slot: int) -> str | None:
         """The strain in a 1-based sample slot, or None if empty/out of range."""

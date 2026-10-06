@@ -609,6 +609,22 @@ class ExperimentController:
         else:
             self.resolution = None
 
+    def set_photo_order(self, slots) -> bool:
+        """Read plate (and strain group) from each photo's position in its folder.
+
+        An empty order stops doing so; the naming rules apply again.
+        """
+        slots = tuple(slots)
+        if len(set(slots)) != len(slots):
+            raise ValueError("Each strain group and plate can appear only once in the photo order.")
+        unknown = {s.group for s in slots if s.group is not None} - set(self.experiment.strain_groups)
+        if unknown:
+            raise ValueError(f"Add strain group {', '.join(sorted(unknown))} on Panel first.")
+        before = self.snapshot()
+        self.experiment.photo_order = slots
+        label = "Use photo order" if slots else "Stop using photo order"
+        return self._commit(before, label, rescan=True)
+
     def set_set_key(self, key: str | None) -> bool:
         before = self.snapshot()
         self.experiment.set_key = key or None
