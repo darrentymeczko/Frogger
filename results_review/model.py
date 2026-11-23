@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
+from copy import deepcopy
+from experiments import analysis
 
 #: Mirrors `spotting_batch.DILUTION_ORDER`: least -> most dilute. The index is
 #: the `d0/d1/d2` token in a sheet filename, and the order spots are compared in.
@@ -72,10 +74,15 @@ class Candidate:
     control_mean: float = math.nan
     control_cv: float = math.nan
     n_strains: int = 0
-    n_significant: int = 0
+    n_significant: float = 0
     rank_score: float = math.nan
     ranked_by: str = ""
     best_set_score: float = math.nan
+    quality_flags: str = ""
+
+    @property
+    def quality_text(self) -> str:
+        return self.quality_flags.replace(";", "; ").replace("_", " ")
 
     #: Position in the CSV's own within-medium order (which is `rank_score`
     #: order). Kept so "sort as the pipeline printed it" needs no re-derivation.
@@ -158,10 +165,11 @@ class Candidate:
             control_mean=_f(row.get("control_mean")),
             control_cv=_f(row.get("control_CV")),
             n_strains=_i(row.get("n_strains")),
-            n_significant=_i(row.get("n_significant")),
+            n_significant=_f(row.get("n_significant")) if "n_significant" in row else 0,
             rank_score=_f(row.get("rank_score")),
             ranked_by=str(row.get("ranked_by", "")),
             best_set_score=_f(row.get("best_set_score")),
+            quality_flags=str(row.get("quality_flags", "") or ""),
             csv_order=order,
         )
 
@@ -282,6 +290,19 @@ class Review:
     all_pairs: bool = False
     picks: dict[str, Pick] = field(default_factory=dict)
     edits: dict[str, dict[SpotKey, SpotEdit]] = field(default_factory=dict)
+    final_analysis: dict = field(default_factory=dict)
+    measurement: dict = field(default_factory=dict)  # empty: inherit recorded/legacy method
+    inclusion: dict[str, bool] = field(default_factory=dict)
+    presentation: dict = field(default_factory=dict)
+    extensions: dict = field(default_factory=dict)
+    _unknown: dict = field(default_factory=dict, repr=False)
+
+    def is_included(self, medium: str) -> bool:
+        """Undecided conditions stay included, regardless of quality/ranking."""
+        return self.inclusion.get(medium, True)
+
+    def set_included(self, medium: str, included: bool) -> None:
+        self.inclusion[medium] = bool(included)
 
     # -- picks ---------------------------------------------------------------
 
@@ -339,10 +360,16 @@ class Review:
                 "posthoc": (self.posthoc if self.statistical_test == "anova"
                             else "none"),
                 "extra_references": tuple(self.extra_references),
-                "all_pairs": self.all_pairs}
+                "all_pairs": self.all_pairs,
+                **analysis.statistics(self.final_analysis)}
 
     def comparisons_text(self) -> str:
         """The comparison set in a few words, for a button or a summary row."""
+        if self.final_analysis:
+            if self.final_analysis.get("all_pairs"):
+                return "all pairs"
+            refs = list(dict.fromkeys(r for v in self.final_analysis["references"].values() for r in v))
+            return "vs " + ", ".join(refs) if refs else "no pairwise comparisons"
         if self.all_pairs:
             return "all pairs"
         if not self.extra_references:
@@ -353,8 +380,14 @@ class Review:
 
     def to_dict(self) -> dict:
         return {
+            **deepcopy(self._unknown),
             "version": self.version,
+            "presentation": deepcopy(self.presentation),
+            "extensions": deepcopy(self.extensions),
             "capture_root": self.capture_root,
+            "measurement": dict(self.measurement),
+            "final_analysis": deepcopy(self.final_analysis),
+            "inclusion": dict(self.inclusion),
             "statistics": {"test": self.statistical_test,
                            "p_adjust": self.p_adjust,
                            "alpha": self.alpha,
@@ -403,6 +436,16 @@ class Review:
             if bucket:
                 edits[str(medium)] = bucket
         return cls(version=_i(d.get("version"), 1),
+                   presentation=deepcopy(d.get("presentation") or {}),
+                   extensions=deepcopy(d.get("extensions") or {}),
+                   _unknown={k: deepcopy(v) for k, v in d.items() if k not in {
+                       "version", "presentation", "extensions", "inclusion", "measurement",
+                       "final_analysis", "capture_root", "statistics", "chosen", "edits"}},
+                   inclusion={str(m): v for m, v in (d.get("inclusion") or {}).items()
+                              if isinstance(v, bool)},
+                   measurement=dict(d.get("measurement") or {}),
+                   final_analysis=(analysis.validate(d["final_analysis"])
+                                   if d.get("final_analysis") else {}),
                    capture_root=str(d.get("capture_root", "") or ""),
                    statistical_test=statistical_test,
                    p_adjust=p_adjust,

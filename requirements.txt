@@ -16,7 +16,7 @@ tifffile>=2023.7.10
 
 matplotlib>=3.7          # previews, montages, diagnostics
 statsmodels>=0.14        # multiple-comparison correction and hierarchical models
-pyprism-plot @ https://github.com/darrentymeczko/PyPrism_Plots/archive/refs/heads/main.zip
+pyprism-plot @ https://github.com/darrentymeczko/PyPrism_Plots/archive/refs/heads/main.zip  # 0.3+: the figure graphs use its plotting functions and Prism defaults
 
 # Export formats
 python-pptx>=0.6.21      # slide deck of montages + graphs

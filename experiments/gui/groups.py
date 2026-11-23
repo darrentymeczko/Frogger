@@ -21,7 +21,7 @@ def add_group(parent, controller, on_change):
             return False
     key = _ask_text(parent, "Add strain group",
                     "Name for the additional strain group.\n"
-                    "Enter its strains and control on Panel, then assign its photos in Data:",
+                    "Enter its strains on Panel; choose references in final Analysis, then assign its photos in Data:",
                     initial=next((k for k in detected if k != first and k not in e.strain_groups), "Group 2" if first else ""),
                     choices=detected)
     if key is None:
@@ -36,20 +36,26 @@ def add_group(parent, controller, on_change):
 
 
 class GroupSelector(ttk.Frame):
-    def __init__(self, master, controller, on_change):
+    def __init__(self, master, controller, on_change, *, allow_add=True):
         super().__init__(master)
         self.ctl, self.on_change = controller, on_change
-        ttk.Label(self, text="Editing strain group:").pack(side="left")
+        self.label = ttk.Label(self, text="Strain group:")
         self.selected = tk.StringVar()
         self.box = ttk.Combobox(self, textvariable=self.selected, state="readonly", width=26)
-        self.box.pack(side="left", padx=6)
         self.box.bind("<<ComboboxSelected>>", self._select)
-        ttk.Button(self, text="Add strain group...",
-                   command=lambda: add_group(self, controller, on_change)).pack(side="left")
+        if allow_add:
+            ttk.Button(self, text="Add strain group...",
+                       command=lambda: add_group(self, controller, on_change)).pack(side="right")
 
     def refresh(self):
         self.ctl.panel_experiment
         names = list(self.ctl.experiment.strain_groups)
+        if names:
+            self.label.pack(side="left")
+            self.box.pack(side="left", padx=6)
+        else:
+            self.label.pack_forget()
+            self.box.pack_forget()
         self.box.configure(values=names or ["One strain group"],
                            state="readonly" if names else "disabled")
         self.selected.set(self.ctl.active_group or "One strain group")

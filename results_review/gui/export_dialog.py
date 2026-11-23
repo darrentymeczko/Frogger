@@ -49,12 +49,14 @@ class ExportDialog(tk.Toplevel):
             ("data", "Per-spot data (.csv)"),
             ("summary", "Chosen photo sets and settings (.csv)"),
             ("statistics", "Statistical results (.csv)"),
-            ("figures", "Graphs (.png and .pdf)"),
+            ("figures", "Graphs (.png, .pdf; Figure Editor also adds .svg + composition)"),
             ("montages", "Photo montages (.png)"),
         )
         self.outputs = {}
+        saved = (review.presentation.get("export", {})
+                 if review.presentation.get("version", 1) == 1 else {})
         for row, (key, label) in enumerate(labels):
-            var = tk.BooleanVar(self, value=True)
+            var = tk.BooleanVar(self, value=saved.get(key, True) is not False)
             self.outputs[key] = var
             ttk.Checkbutton(outputs, text=label, variable=var).grid(
                 row=row, column=0, sticky="w", pady=2)
@@ -69,7 +71,7 @@ class ExportDialog(tk.Toplevel):
         ttk.Button(actions, text="Select all outputs", command=self._all_outputs).pack(
             side="left", padx=6)
 
-        ttk.Label(body, text="Treatments — all selected initially").grid(
+        ttk.Label(body, text="Treatments — saved inclusion decisions").grid(
             row=3, column=0, sticky="w", pady=(12, 4))
         selection = ttk.Frame(body)
         selection.grid(row=4, column=0, sticky="nsew")
@@ -87,8 +89,10 @@ class ExportDialog(tk.Toplevel):
             detail = (f"{cand.timepoint} / {cand.dilution} / {', '.join(cand.photos)}"
                       if cand else "choose a current candidate first")
             self.treatments.insert("end", f"{run.medium_label(medium)}: {detail}")
-        self.treatments.selection_set(0, "end")
-        ttk.Label(body, text="Click a treatment to include or exclude it.").grid(
+        for i, medium in enumerate(self.media):
+            if review.is_included(medium):
+                self.treatments.selection_set(i)
+        ttk.Label(body, text="Click to include/exclude. Export saves these decisions with the review.").grid(
             row=5, column=0, sticky="w", pady=(3, 8))
 
         destination = ttk.LabelFrame(body, text="Save to folder", padding=8)

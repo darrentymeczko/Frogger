@@ -33,7 +33,8 @@ SORT_KEYS = {
     "pair": (lambda c: (c.plate1, c.plate2, _num(c.hours, math.inf)), False),
     "score": (lambda c: _num(c.best_set_score, -math.inf), True),
     "cv": (lambda c: _num(c.median_cv, math.inf), False),
-    "sig": (lambda c: (c.n_significant, -_num(c.median_cv, math.inf)), True),
+    "sig": (lambda c: (_num(c.n_significant, -math.inf), -_num(c.median_cv, math.inf)), True),
+    "quality": (lambda c: c.quality_flags, False),
 }
 
 #: Opening order: the pipeline's own ranking, best first.
@@ -149,7 +150,8 @@ class CandidateList(ttk.Frame):
 
     COLUMNS = (("mark", "", 36), ("when", "Timepoint", 78),
                ("dil", "Dilution", 62), ("pair", "Photos", 130),
-               ("score", "Score", 52), ("cv", "CV", 50), ("sig", "Sig", 44))
+               ("score", "Score", 52), ("cv", "CV", 50), ("sig", "Sig tests", 64),
+               ("quality", "Quality", 180))
 
     def __init__(self, master, on_select: Callable[[Candidate], None],
                  on_choose: Callable[[Candidate], None], **kw) -> None:
@@ -179,6 +181,10 @@ class CandidateList(ttk.Frame):
         self.tree.grid(row=0, column=0, sticky="nsew")
         bar.grid(row=0, column=1, sticky="ns")
 
+        horizontal = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.tree.configure(xscrollcommand=horizontal.set)
+
         self.tree.tag_configure("default", foreground=theme.DEFAULT_MARK)
         self.tree.tag_configure("datareview", foreground=theme.REVIEWED_BAD)
         self.tree.tag_configure("chosen", background=theme.CHOSEN_SOFT,
@@ -191,7 +197,7 @@ class CandidateList(ttk.Frame):
 
         self.count = ttk.Label(self, text="", font=theme.FONT_SMALL,
                                foreground=theme.MUTED, anchor="w")
-        self.count.grid(row=1, column=0, columnspan=2, sticky="ew",
+        self.count.grid(row=2, column=0, columnspan=2, sticky="ew",
                         pady=(theme.GAP - 1, 0))
 
         self._candidates: list[Candidate] = []
@@ -199,11 +205,13 @@ class CandidateList(ttk.Frame):
         self._chosen: "Candidate | None" = None
         self._has_sheet = set()
         self._flagged: dict = {}
+        self.metrics_stale = False
 
     # -- contents ------------------------------------------------------------
 
     def show(self, candidates: list[Candidate], default: "Candidate | None",
-             chosen: "Candidate | None", has_sheet, flagged=None) -> None:
+             chosen: "Candidate | None", has_sheet, flagged=None, *,
+             selected: "Candidate | None" = None, metrics_stale=False) -> None:
         """`flagged`: candidate key -> (plates, spots) the data review flagged
         among what that candidate scores. Marked ⚑; nothing is hidden."""
         self._candidates = list(candidates)
@@ -211,7 +219,10 @@ class CandidateList(ttk.Frame):
         self._chosen = chosen
         self._has_sheet = set(has_sheet)
         self._flagged = dict(flagged or {})
-        self._repopulate()
+        self.metrics_stale = metrics_stale
+        if metrics_stale and self.sort_key in {"score", "cv", "sig", "quality"}:
+            self.sort_key, self.sort_desc = "when", False
+        self._repopulate(selected or chosen)
 
     def sort_by(self, column: str) -> None:
         """Clicking a header sorts by it; clicking it again reverses.
@@ -220,6 +231,8 @@ class CandidateList(ttk.Frame):
         first, which differs per column -- highest score, but LOWEST spread.
         """
         if column not in SORT_KEYS:
+            return
+        if self.metrics_stale and column in {"score", "cv", "sig", "quality"}:
             return
         if column == self.sort_key:
             self.sort_desc = not self.sort_desc
@@ -235,7 +248,8 @@ class CandidateList(ttk.Frame):
                 if key == self.sort_key else ""
             self.tree.heading(key, text=f"{title}{arrow}")
 
-    def _repopulate(self) -> None:
+    def _repopulate(self, selected: "Candidate | None" = None) -> None:
+        selected = selected or self._current() or self._chosen
         key, _default_desc = SORT_KEYS.get(self.sort_key,
                                            SORT_KEYS[DEFAULT_SORT])
         # csv_order as the final tiebreak, so equal rows keep a stable order
@@ -267,13 +281,17 @@ class CandidateList(ttk.Frame):
             self.tree.insert(
                 "", "end", iid=iid, tags=tuple(tags),
                 values=(mark, c.timepoint, c.dilution, c.detail,
-                        _fmt(c.best_set_score, ".2f"), _fmt(c.median_cv, ".3f"),
-                        f"{c.n_significant}/{c.n_strains}"))
-            if self._chosen is not None and c.key == self._chosen.key:
+                        "—" if self.metrics_stale else _fmt(c.best_set_score, ".2f"),
+                        "—" if self.metrics_stale else _fmt(c.median_cv, ".3f"),
+                        "—" if self.metrics_stale else _fmt(c.n_significant, "g"),
+                        "Recalculate to assess" if self.metrics_stale else c.quality_text))
+            if selected is not None and c.key == selected.key:
                 select = iid
         n_missing = len(self._candidates) - len(
             [c for c in self._candidates if c.key in self._has_sheet])
         note = f"{len(self._candidates)} candidates"
+        if self.metrics_stale:
+            note += " · Original ranking invalidated; rerun selection to rank again"
         if n_missing:
             note += f" · {n_missing} without a drawn sheet"
         if self._flagged:
@@ -281,6 +299,7 @@ class CandidateList(ttk.Frame):
         self.count.configure(text=note)
         if select is not None:
             self.tree.selection_set(select)
+            self.tree.focus(select)
             self.tree.see(select)
 
     def mark_chosen(self, chosen: "Candidate | None") -> None:
@@ -303,8 +322,9 @@ class CandidateList(ttk.Frame):
         if not sel:
             target = kids[0]
         else:
-            i = kids.index(sel[0]) + delta
-            if i < 0 or i >= len(kids):
+            current = kids.index(sel[0])
+            i = max(0, min(len(kids) - 1, current + delta))
+            if i == current:
                 return False
             target = kids[i]
         self.tree.selection_set(target)

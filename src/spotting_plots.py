@@ -150,7 +150,7 @@ def _ordered_strains(group: pd.DataFrame, control: str) -> list[str]:
 
 
 def comparison_pairs(names: list[str], control: str, extra_references=(),
-                     all_pairs: bool = False) -> list[tuple[str, str]]:
+                     all_pairs: bool = False, comparison_references=None) -> list[tuple[str, str]]:
     """The (reference, strain) pairs to test, in the order they are drawn.
 
     By default every strain against the control -- exactly the comparisons the
@@ -158,11 +158,13 @@ def comparison_pairs(names: list[str], control: str, extra_references=(),
     other strain is also compared with; `all_pairs` compares every strain with
     every other. A pair is tested once however many ways it is requested.
     """
-    names = list(names)
+    names = list(dict.fromkeys(names))
     if all_pairs:
         return [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
     refs = [control] + [r for r in dict.fromkeys(extra_references or ())
                         if r in names and r != control]
+    if comparison_references is not None:
+        refs = [r for r in dict.fromkeys(comparison_references) if r in names]
     seen, out = set(), []
     for ref in refs:
         for name in names:
@@ -172,6 +174,18 @@ def comparison_pairs(names: list[str], control: str, extra_references=(),
             seen.add(key)
             out.append((ref, name))
     return out
+
+
+def references_for(group, selection):
+    if selection is None:
+        return None
+    # Immutable pairs allow the GUI's statistical-result cache to hash settings.
+    if selection and isinstance(selection[0], (tuple, list)):
+        mapping = dict(selection)
+        column = "analysis_condition" if "analysis_condition" in group else "treatment"
+        code = str(group[column].iloc[0]) if column in group and len(group) else "*"
+        return mapping.get(code, mapping.get("*", ()))
+    return selection
 
 
 def _floored(sub: pd.DataFrame) -> pd.DataFrame:
@@ -412,7 +426,7 @@ def _anova_test(group: pd.DataFrame, control: str, posthoc: str = "none",
 def vs_control(group: pd.DataFrame, control: str, *,
                statistical_test: str = "t_test", p_adjust: str = "none",
                posthoc: str = "none", extra_references=(),
-               all_pairs: bool = False) -> dict[str, tuple[float, float]]:
+               all_pairs: bool = False, comparison_references=None) -> dict[str, tuple[float, float]]:
     """Each strain's comparison with the control, tested as the graph tests it.
 
     {strain: (p, ratio)}: `p` is the value the graph decides significance on
@@ -430,7 +444,8 @@ def vs_control(group: pd.DataFrame, control: str, *,
     if statistical_test == "anova" and posthoc == "none":
         return {}
     pairs = comparison_pairs(_ordered_strains(group, control), control,
-                             extra_references, all_pairs)
+                             extra_references, all_pairs,
+                             references_for(group, comparison_references))
     tests = (_ratio_tests(group, control, p_adjust, pairs)
              if statistical_test == "t_test"
              else _anova_test(group, control, posthoc, pairs))
@@ -552,7 +567,7 @@ def _tick_map_horizontal(fig, ax, names: list, bbox) -> str:
     pitch = abs(pts[1][1] - pts[0][1]) if len(pts) > 1 else 0.0
     return json.dumps({
         "orientation": "horizontal",
-        "size": [round(bbox.width * GRAPH_DPI), round(bbox.height * GRAPH_DPI)],
+        "size": [int(bbox.width * GRAPH_DPI), int(bbox.height * GRAPH_DPI)],
         "axis_x": round(pts[0][0], 1) if pts else 0,
         "pitch": round(pitch, 2),
         "ticks": [{"name": n, "y": round(float(y), 1)}
@@ -591,7 +606,7 @@ def _tick_map(fig, ax, names: list, y_bottom: float, bbox) -> str:
     labels = ax.get_yticklabels()
     size = labels[0].get_fontsize() if labels else 10
     return json.dumps({
-        "size": [round(bbox.width * GRAPH_DPI), round(bbox.height * GRAPH_DPI)],
+        "size": [int(bbox.width * GRAPH_DPI), int(bbox.height * GRAPH_DPI)],
         "axis_y": round(axis_y + lw / 2 + 1),
         "left": round(left - lw, 1),
         "ylabel_half": round(size * GRAPH_DPI / 72 * 0.6, 1),
@@ -701,7 +716,9 @@ def _draw_one(group: pd.DataFrame, tests: pd.DataFrame, control: str,
         ax.set_xlim(-0.6, len(names) - 0.4)
         ax.set_ylim(y_bottom, y_top)
         ax.set_yticks(np.arange(0, y_top + 0.001, 0.5))
-        ppp.style_axes(ax, axis_text_angle=45, line_width=1.0)
+        # The end of each slanted name on its tick, the rest below the axis
+        # (centred on the tick, half of it would cross the axis line).
+        ppp.style_axes(ax, axis_text_angle=45, axis_text_ha="right", line_width=1.0)
         for label in ax.get_xticklabels():
             label.set_fontstyle("italic")
 
@@ -812,13 +829,40 @@ def horizontal_of(graph_png) -> Path:
     return graph_png.parent / HORIZONTAL_DIR / graph_png.name
 
 
+def _draw_unavailable(raw, stem, title):
+    """Keep a raw-only condition in figures without inventing bars or tests."""
+    import textwrap
+    import matplotlib.pyplot as plt
+    reasons = list(dict.fromkeys(str(r).replace("_", " ") for r in
+                   raw.get("normalization_reason", []) if isinstance(r, str) and r))
+    message = "; ".join(reasons) or "No suitable included measurements"
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.axis("off")
+    ax.set_title(str(title), wrap=True)
+    ax.text(.5, .6, "Relative growth unavailable", ha="center", fontsize=16)
+    ax.text(.5, .35, textwrap.fill(message, 70) +
+            "\n\nRaw measurements and quality reasons are retained in the per-spot CSV.\n"
+            "No ratios or statistical results were substituted.",
+            ha="center", va="center", transform=ax.transAxes)
+    for horizontal in (False, True):
+        target = stem
+        if horizontal:
+            folder = stem.parent / "horizontal"
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / stem.name
+        fig.savefig(target.with_suffix(".png"), dpi=160, bbox_inches="tight")
+        if not horizontal:
+            fig.savefig(target.with_suffix(".pdf"), bbox_inches="tight")
+    plt.close(fig)
+
+
 def draw(csv_path: Path, outdir: Path, *, control: str | None = None,
          value: str = "relative_growth", y_label: str = "Relative Growth",
          width: float = 5.2, height: float = 5.4, base_size: float = 12,
          statistical_test: str = "t_test", p_adjust: str = "none",
          alpha: float = 0.05,
          posthoc: str = "none", extra_references=(), all_pairs: bool = False,
-         show_ns: bool = False,
+         comparison_references=None, show_ns: bool = False,
          keep_artifacts: bool = False, keep_outliers: bool = False) -> list[Path]:
     """Draw every treatment in ``csv_path`` and write the combined test CSV.
 
@@ -838,21 +882,27 @@ def draw(csv_path: Path, outdir: Path, *, control: str | None = None,
         raise ValueError("alpha must be between 0 and 1")
     csv_path, outdir = Path(csv_path).resolve(), Path(outdir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
-    data = _filtered(pd.read_csv(csv_path, encoding="utf-8-sig"), value,
+    original = pd.read_csv(csv_path, encoding="utf-8-sig")
+    data = _filtered(original, value,
                      keep_artifacts=keep_artifacts,
                      keep_outliers=keep_outliers)
-    treatments = list(dict.fromkeys(data["treatment"].tolist()))
+    treatments = list(dict.fromkeys(original["treatment"].tolist()))
     made, all_tests = [], []
     for treatment in treatments:
         group = data[data["treatment"] == treatment].copy()
         if group.empty:
+            raw = original[original["treatment"] == treatment]
+            stem = outdir / f"spotting_{safe_name(treatment)}"
+            _draw_unavailable(raw, stem, treatment)
+            made.append(stem.with_suffix(".png"))
             continue
         control_name = _control_for(group, control)
         if control_name not in set(group["strain"]):
             print(f"  ! control {control_name!r} not present in {treatment!r}; skipped")
             continue
         pairs = comparison_pairs(_ordered_strains(group, control_name),
-                                 control_name, extra_references, all_pairs)
+                                 control_name, extra_references, all_pairs,
+                                 references_for(group, comparison_references))
         tests = (_ratio_tests(group, control_name, p_adjust, pairs)
                  if statistical_test == "t_test"
                  else _anova_test(group, control_name, posthoc, pairs))

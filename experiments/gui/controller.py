@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import replace
 from contextlib import contextmanager
 from copy import deepcopy
+import math
 import re
 from pathlib import Path
 from typing import Callable
@@ -144,7 +145,8 @@ class ExperimentController:
         if not e.strain_groups:
             e.strain_groups[first_key] = StrainGroup(
                 list(e.strains), e.control_slot, deepcopy(e.picks),
-                {c.code: deepcopy(c) for c in e.conditions})
+                {c.code: deepcopy(c) for c in e.conditions},
+                final_analysis=deepcopy(e.final_analysis))
         slots = self.template.sample_slots() if self.template else e.slot_count()
         e.strain_groups[key] = StrainGroup(
             [None] * slots, conditions={c.code: Condition(c.code, c.label) for c in e.conditions})
@@ -198,9 +200,14 @@ class ExperimentController:
     def dirty(self) -> bool:
         return to_dict(self.experiment) != self._saved
 
-    def mark_saved(self) -> None:
+    def mark_saved(self, *, notify: bool = True) -> None:
         self._saved = to_dict(self.experiment)
-        self._notify()
+        if notify:
+            self._notify()
+
+    def mark_unsaved(self) -> None:
+        """A new document handed a layout has useful content to protect."""
+        self._saved = None
 
     def replace(self, experiment: Experiment) -> None:
         """Load a different experiment; history does not survive."""
@@ -212,34 +219,28 @@ class ExperimentController:
         self.scan_error = ""
         self.profile_report = []
         self.load_template()
+        self.mark_saved(notify=False)
         self.rescan()
 
     # -- the plate template --------------------------------------------------
 
     def load_template(self, base: Path | None = None) -> None:
         """Load the bound plate template. Never raises; errors are reported."""
-        from plate_template.schema import TemplateError, load
+        from plate_template.schema import TemplateError
+        from ..layout import pin
 
         self._template_base = base
         self.template, self.template_error = None, ""
-        raw = self.experiment.template_path
-        if not raw:
+        try:
+            self.template = pin(self.experiment, base)
+        except TemplateError as exc:
+            self.template_error = str(exc)
             return
-        candidates = [Path(raw)]
-        if base is not None:
-            candidates.append(Path(base) / raw)
-        candidates.extend((REPO / raw, BUNDLE / raw))
-        for path in candidates:
-            if path.exists():
-                try:
-                    self.template = load(path)
-                except TemplateError as exc:
-                    self.template_error = str(exc)
-                return
-        self.template_error = f"not found: {raw}"
+        if self.template is None and self.experiment.template_path:
+            self.template_error = f"not found: {self.experiment.template_path}"
 
     def bind_template(self, path: Path) -> bool:
-        """Point the experiment at a plate template file."""
+        """Copy a reusable file into this experiment, retaining its provenance."""
         from plate_template.schema import TemplateError, load
 
         try:
@@ -249,9 +250,22 @@ class ExperimentController:
             self._notify()
             return False
 
+        return self.use_layout(template, source_path=_relative_to_repo(path))
+
+    def use_layout(self, template, *, source_path: str = "") -> bool:
+        """Accept a detached layout as one undoable experiment edit.
+
+        Preserve named out-of-range slots, picks and scientific decisions;
+        validation explains incompatibilities instead of deleting user data.
+        """
+        from plate_template.schema import from_dict as layout_from_dict, to_dict as layout_to_dict
+
+        snapshot = layout_to_dict(template)
+        template = layout_from_dict(snapshot)
         before = self.snapshot()
         self.experiment.template_id = template.id
-        self.experiment.template_path = _relative_to_repo(path)
+        self.experiment.template_path = source_path
+        self.experiment.template_snapshot = snapshot
         # Grow the panel to the template's shape, so every slot has a row to
         # type a name into. Existing names keep their slots.
         slots = template.sample_slots()
@@ -266,12 +280,8 @@ class ExperimentController:
             self.experiment.strains[slots:]
         ):
             del self.experiment.strains[slots:]
-        if self.experiment.control_slot is None:
-            self.experiment.control_slot = next(
-                (p.control_slot for p in template.plates if p.control_slot), None
-            )
         self.template, self.template_error = template, ""
-        return self._commit(before, f"Use template {template.name!r}")
+        return self._commit(before, f"Use layout {template.name!r}", rescan=True)
 
     # -- the panel -----------------------------------------------------------
 
@@ -282,8 +292,27 @@ class ExperimentController:
 
     def set_strain(self, slot: int, name: str) -> bool:
         before = self.snapshot()
+        old = self.panel_experiment.strain(slot)
+        config = self.panel_experiment.final_analysis
+        if old and name.strip() and config:
+            for code, refs in config["references"].items():
+                config["references"][code] = list(dict.fromkeys(name.strip() if r == old else r for r in refs))
         self.panel_experiment.set_strain(slot, name.strip())
         return self._commit(before, f"Name slot {slot}")
+
+    def set_final_analysis(self, config: dict) -> bool:
+        from .. import analysis
+        config = analysis.validate(config)
+        panel = self.panel_experiment
+        analysis.check_panel(config, panel.strains, panel.condition_codes(),
+                             {c.code: c.exclude for c in panel.conditions})
+        before = self.snapshot()
+        target = (self.experiment.strain_groups[self.active_group]
+                  if self.experiment.strain_groups else self.experiment)
+        target.final_analysis = config
+        if config["all_pairs"] and self.experiment.statistics.posthoc == "dunnett":
+            self.experiment.statistics.posthoc = "tukey"
+        return self._commit(before, "Apply final normalization and comparisons")
 
     def set_control(self, slot: int) -> bool:
         before = self.snapshot()
@@ -292,6 +321,10 @@ class ExperimentController:
             self.experiment.strain_groups[self.active_group].control_slot = slot
         else:
             self.experiment.control_slot = slot
+        target = (self.experiment.strain_groups[self.active_group]
+                  if self.experiment.strain_groups else self.experiment)
+        if target.final_analysis:
+            target.final_analysis["normalization"]["*"] = slot
         return self._commit(before, f"Set control to slot {slot}")
 
     def set_mode(self, mode: str) -> bool:
@@ -334,7 +367,10 @@ class ExperimentController:
             raise ValueError(f"unknown post-hoc test {stats.posthoc!r}")
         if not 0 < float(stats.alpha) < 1:
             raise ValueError("the p cutoff must be between 0 and 1")
-        if stats.all_pairs and stats.posthoc == "dunnett":
+        final_all_pairs = any(p.final_analysis.get("all_pairs", False) for p in
+            ([self.experiment.for_group(k) for k in self.experiment.strain_groups]
+             if self.experiment.strain_groups else [self.experiment]))
+        if (stats.all_pairs or final_all_pairs) and stats.posthoc == "dunnett":
             if changes.get("posthoc") == "dunnett":
                 raise ValueError("Dunnett's test compares strains with a "
                                  "reference; use Tukey HSD for every pair")
@@ -410,6 +446,9 @@ class ExperimentController:
         if any(c.code != code and self._name_key(c.display()) == self._name_key(name)
                for c in e.conditions):
             raise ValueError("Another treatment already has that name.")
+        owner = e.profile.aliases.get(self._name_key(name))
+        if owner is not None and owner != code:
+            raise ValueError("That name is a recorded photo alias for another treatment.")
         before = self.snapshot()
         condition = e.condition(code)
         if condition.display() == name:
@@ -419,7 +458,14 @@ class ExperimentController:
         for spelling in spellings:
             e.profile.aliases[self._name_key(spelling)] = code
         condition.label = name
-        return self._commit(before, f"Rename treatment to {name}", rescan=True)
+        previous_resolution = deepcopy(self.resolution)
+        try:
+            return self._commit(before, f"Rename treatment to {name}", rescan=True)
+        except Exception:
+            # Resolution must succeed before history/notifications are published.
+            self.experiment = from_dict(before)
+            self.resolution = previous_resolution
+            raise
 
     def assign_treatment(self, relpaths, name: str) -> bool:
         """Resolve a name and assign photos in one undoable operation."""
@@ -448,19 +494,60 @@ class ExperimentController:
         return self._commit(before, f"Add condition {code}", rescan=True)
 
     def remove_condition(self, code: str) -> bool:
-        if not self.experiment.has_condition(code):
+        return self.remove_conditions([code])
+
+    def condition_photo_links(self, codes) -> set[str]:
+        """Resolved and explicit assignments, including inactive strain groups."""
+        codes = set(codes)
+        paths = {p for p, v in self.experiment.overrides.items()
+                 if v.get("condition") in codes}
+        if self.resolution:
+            paths.update(r.relpath for r in self.resolution.rows if r.condition in codes)
+        return paths
+
+    def remove_conditions(self, codes) -> bool:
+        """Remove exactly these global identities in one reversible edit.
+
+        A null assignment blocks filename/sole-condition inference from silently
+        moving a linked photo to a surviving treatment. No source file is touched.
+        """
+        codes = set(codes) & set(self.experiment.condition_codes())
+        if not codes:
             return False
         before = self.snapshot()
-        self.experiment.conditions.remove(self.experiment.condition(code))
-        self.experiment.picks.pop(code, None)
-        for group in self.experiment.strain_groups.values():
-            group.conditions.pop(code, None)
-            group.picks.pop(code, None)
-        return self._commit(before, f"Remove condition {code}", rescan=True)
+        previous_resolution = deepcopy(self.resolution)
+        e = self.experiment
+        for path in self.condition_photo_links(codes):
+            entry = e.overrides.setdefault(path, {})
+            entry["condition"] = None
+            entry.pop("condition_label", None)
+        e.conditions[:] = [c for c in e.conditions if c.code not in codes]
+        e.keywords = tuple(k for k in e.keywords
+                           if not (k.facet == "condition" and k.value in codes))
+        for target in [e, *e.strain_groups.values()]:
+            for code in codes:
+                target.picks.pop(code, None)
+                if target is not e:
+                    target.conditions.pop(code, None)
+                for field in ("normalization", "references"):
+                    target.final_analysis.get(field, {}).pop(code, None)
+        try:
+            return self._commit(before, f"Remove {len(codes)} condition(s)", rescan=True)
+        except Exception:
+            self.experiment = from_dict(before)
+            self.resolution = previous_resolution
+            raise
 
     def set_condition_control(self, code: str, slot: int | None) -> bool:
         before = self.snapshot()
         self._panel_condition(code).control_slot = slot
+        target = (self.experiment.strain_groups[self.active_group]
+                  if self.experiment.strain_groups else self.experiment)
+        if target.final_analysis:
+            if slot is None:
+                target.final_analysis["normalization"].pop(code, None)
+            else:
+                target.final_analysis["normalization"][code] = slot
         where = f"slot {slot}" if slot is not None else "the experiment's"
         return self._commit(before, f"{code}: control is {where}")
 
@@ -468,6 +555,105 @@ class ExperimentController:
         before = self.snapshot()
         self._panel_condition(code).exclude = tuple(sorted(set(slots)))
         return self._commit(before, f"{code}: excluded slots")
+
+    # -- treatment categories -------------------------------------------------
+    # Categories belong to the experiment, not to a strain group: every panel
+    # is spotted on the same treatments, so they differ in the same ways.
+
+    def _category_name(self, name: str, *, besides: str | None = None) -> str:
+        name = " ".join(name.split())
+        if not name:
+            raise ValueError("Enter a category name.")
+        if any(self._name_key(n) == self._name_key(name) and n != besides
+               for n in self.experiment.categories):
+            raise ValueError("There is already a category with that name.")
+        return name
+
+    def add_category(self, name: str) -> str:
+        name = self._category_name(name)
+        before = self.snapshot()
+        self.experiment.categories.append(name)
+        self._commit(before, f"Add category {name}")
+        return name
+
+    def rename_category(self, old: str, name: str) -> bool:
+        name = self._category_name(name, besides=old)
+        if name == old:
+            return False
+        before = self.snapshot()
+        e = self.experiment
+        e.categories[e.categories.index(old)] = name
+        for c in e.conditions:
+            if old in c.categories:
+                c.categories = {name if k == old else k: v for k, v in c.categories.items()}
+        return self._commit(before, f"Rename category {old} to {name}")
+
+    def remove_category(self, name: str) -> bool:
+        before = self.snapshot()
+        e = self.experiment
+        e.categories.remove(name)
+        for c in e.conditions:
+            c.categories.pop(name, None)
+        return self._commit(before, f"Remove category {name}")
+
+    def move_category(self, name: str, step: int) -> bool:
+        names = self.experiment.categories
+        i = names.index(name)
+        j = max(0, min(len(names) - 1, i + step))
+        if i == j:
+            return False
+        before = self.snapshot()
+        names.insert(j, names.pop(i))
+        return self._commit(before, f"Move category {name}")
+
+    def set_category_value(self, codes, name: str, value: str) -> bool:
+        """One category's value for several treatments -- one undo step.
+
+        A value spelt like one already in use ("glucose" for "Glucose") takes
+        that spelling, so the figures never see two groups that are one.
+        """
+        e = self.experiment
+        if name not in e.categories:
+            raise KeyError(f"no category {name!r}")
+        value = " ".join(str(value).split())
+        existing = {self._name_key(v): v for v in e.category_values(name)}
+        value = existing.get(self._name_key(value), value) if value else ""
+        before = self.snapshot()
+        for code in codes:
+            condition = e.condition(code)
+            if value:
+                condition.categories[name] = value
+            else:
+                condition.categories.pop(name, None)
+        shown = value or "nothing"
+        return self._commit(before, f"{name}: {shown} for {len(tuple(codes))} treatment(s)")
+
+    def fill_categories(self, values: dict, *, keep_existing: bool = True) -> bool:
+        """Set many treatments' category values at once -- one undo step.
+
+        ``values`` is code -> {category: value}; a category not yet in the
+        experiment is added. With ``keep_existing`` a value the user already
+        gave is never replaced.
+        """
+        e = self.experiment
+        before = self.snapshot()
+        for own in values.values():
+            for name in own:
+                if not any(self._name_key(n) == self._name_key(name) for n in e.categories):
+                    e.categories.append(self._category_name(name))
+        canonical = {self._name_key(n): n for n in e.categories}
+        for code, own in values.items():
+            if not e.has_condition(code):
+                continue
+            condition = e.condition(code)
+            for name, value in own.items():
+                name = canonical[self._name_key(name)]
+                value = " ".join(str(value).split())
+                if not value or (keep_existing and condition.category(name)):
+                    continue
+                spelled = {self._name_key(v): v for v in e.category_values(name)}
+                condition.categories[name] = spelled.get(self._name_key(value), value)
+        return self._commit(before, "Fill categories from names")
 
     def adopt_found_conditions(self) -> bool:
         """Declare every condition the photos turned out to hold."""
@@ -512,6 +698,8 @@ class ExperimentController:
         for entry in e.overrides.values():
             if entry.get("condition") == old:
                 entry["condition"] = code
+        e.keywords = tuple(replace(k, value=code) if k.facet == "condition" and k.value == old else k
+                           for k in e.keywords)
         if old in e.picks and old != code:
             e.picks[code] = e.picks.pop(old)
         for group in e.strain_groups.values():
@@ -522,6 +710,12 @@ class ExperimentController:
                     group.conditions[code] = group.conditions.pop(old)
                     group.conditions[code].code = code
         condition.code, condition.label = code, label or code
+        if old != code:
+            for target in [e, *e.strain_groups.values()]:
+                for field in ("normalization", "references"):
+                    mapping = target.final_analysis.get(field, {})
+                    if old in mapping:
+                        mapping[code] = mapping.pop(old)
         return self._commit(before, f"Rename condition {old}", rescan=True)
 
     def set_profile(self, profile) -> bool:
@@ -624,6 +818,60 @@ class ExperimentController:
         self.experiment.photo_order = slots
         label = "Use photo order" if slots else "Stop using photo order"
         return self._commit(before, label, rescan=True)
+
+    def add_keyword(self, text: str, facet: str, value, where: str = "anywhere") -> bool:
+        """`Photos whose name contains <text> are <facet> = <value>`.
+
+        A treatment value is a name, found or created like any other treatment;
+        a strain group must already exist on Panel. Plate and hours are checked
+        the same way the per-photo corrections check them.
+        """
+        from ..profiles import KeywordRule
+
+        text = text.strip()
+        if not text:
+            raise ValueError("Enter the text to look for in folder or file names.")
+        e = self.experiment
+        before = self.snapshot()
+        if facet == "condition":
+            value = self._ensure_named_condition(str(value))
+        elif facet == "set":
+            value = str(value).strip()
+            if value not in e.strain_groups:
+                raise ValueError("Add this strain group on Panel first, including its strains and control.")
+        elif facet == "plate":
+            try:
+                value = int(str(value).strip())
+            except ValueError:
+                raise ValueError("Enter a plate number.") from None
+            if value < 1:
+                raise ValueError("Plate numbers start at 1.")
+        elif facet == "timepoint":
+            try:
+                value = float(str(value).strip())
+            except ValueError:
+                raise ValueError("Enter the hours since spotting as a number.") from None
+            if not math.isfinite(value) or value < 0:
+                raise ValueError("Hours must be a finite, nonnegative number.")
+        else:
+            raise ValueError(f"Unknown detail {facet!r}.")
+        rule = KeywordRule(text, facet, value, where)
+        rule.check()
+        # The same keyword for the same detail is one rule; re-adding edits it.
+        kept = tuple(k for k in e.keywords if not (k.text.casefold() == text.casefold()
+                                                   and k.facet == facet and k.where == where))
+        e.keywords = (*kept, rule)
+        return self._commit(before, f"Keyword {text!r}", rescan=True)
+
+    def remove_keywords(self, rules) -> bool:
+        drop = set(rules)
+        before = self.snapshot()
+        self.experiment.keywords = tuple(k for k in self.experiment.keywords if k not in drop)
+        return self._commit(before, f"Remove {len(drop)} keyword rule(s)", rescan=True)
+
+    def keyword_matches(self, rule) -> int:
+        """How many photos in the folder this rule applies to."""
+        return sum(rule.matches(f.parts) for f in self.files)
 
     def set_set_key(self, key: str | None) -> bool:
         before = self.snapshot()
@@ -797,10 +1045,8 @@ class ExperimentController:
 
     def _restore(self, snapshot: dict) -> None:
         old_root = self.experiment.photo_root
-        old_template = (self.experiment.template_path, self.experiment.template_id)
         self.experiment = from_dict(snapshot)
-        if old_template != (self.experiment.template_path, self.experiment.template_id):
-            self.load_template(self._template_base)
+        self.load_template(self._template_base)
         self.profile_report = []
         if self.experiment.photo_root != old_root:
             # History must not silently replace the restored naming rules.

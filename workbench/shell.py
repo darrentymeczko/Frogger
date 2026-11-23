@@ -50,8 +50,9 @@ from .registry import BY_KEY, KINDS, import_configuration, kind_of, path_key
 from .settings import ROOT, Settings
 from .tabs import TabStrip
 from .toast import ToastArea
+from .tour import Tour
 
-APP_TITLE = "Spotting Quantification"
+APP_TITLE = "Frogger"
 ERROR_LOG = ROOT / "workbench_error.log"
 FROZEN = bool(getattr(sys, "frozen", False))
 
@@ -84,9 +85,16 @@ def program_command(*args: str) -> list[str]:
 
 class Shell:
     def __init__(self, root: tk.Tk, settings: Settings | None = None, *,
-                 restore: bool = True, log_dir: Path | None = LOG_DIR) -> None:
+                 restore: bool = True, log_dir: Path | None = LOG_DIR,
+                 tour: bool = False) -> None:
+        """`tour`: start the guided tour by itself on a first launch, and a
+        tool's own chapter the first time that tool is shown."""
         self.root = root
         self.settings = settings if settings is not None else Settings()
+        self.tour = Tour(self, auto=tour)
+        #: True while last time's documents are being reopened: the tour
+        #: waits for the window to settle rather than chasing each tab.
+        self._restoring = bool(restore)
         self.documents: list[DocumentHost] = []
         self.active: DocumentHost | None = None
         self.runner = JobRunner(self._job_changed,
@@ -126,6 +134,8 @@ class Shell:
         self._tick_id = root.after(1000, self._tick)
         if restore:
             root.after_idle(self._restore_session)
+        else:
+            root.after_idle(self.tour.first_run)
 
     # -- construction --------------------------------------------------------------
 
@@ -212,6 +222,9 @@ class Shell:
         self.file_menu.add_cascade(label="Open", menu=self.open_menu)
         self.file_menu.add_command(label="Save", accelerator="Ctrl+S",
                                    command=lambda: self.run_command("save"))
+        self.file_menu.add_command(label="Open Results…", command=lambda: self.ask_open("review"))
+        self.file_menu.add_command(label="Save Results", command=lambda: self._results_command("save"))
+        self.file_menu.add_command(label="Save Results As…", command=lambda: self._results_command("save_as"))
         self.file_menu.add_separator()
         self.file_menu.add_command(label="Close tab", accelerator="Ctrl+W",
                                    command=self._close_active)
@@ -229,14 +242,26 @@ class Shell:
             value=bool(self.settings.get("explorer", True)))
 
         self.help_menu = tk.Menu(self.menubar, tearoff=False)
+        self.help_menu.add_command(label="Take the guided tour",
+                                   command=self.tour.restart)
+        self.help_menu.add_command(label="Practice run",
+                                   command=self.tour.start_practice)
+        self.help_menu.add_separator()
         self.help_menu.add_command(label="Read the manual",
                                    command=self.open_readme)
+        from uikit.data_organization import show_data_organization
+        self.help_menu.add_command(label="Photograph and folder organization",
+                                   command=lambda: show_data_organization(self.root))
         self.help_menu.add_command(label="Open the project folder",
                                    command=self.open_project_folder)
         self.help_menu.add_command(label="Check the installation",
                                    command=self.run_selftest)
         self.help_menu.add_separator()
         self.help_menu.add_command(label=f"About {APP_TITLE}", command=self.about)
+
+    def _results_command(self, name):
+        if self.active is not None and self.active.kind == "review":
+            self.run_command(name)
 
     # -- the menubar follows the active tab -------------------------------------------
 
@@ -269,6 +294,18 @@ class Shell:
             file_menu.add_command(label=f"Exit {APP_TITLE}", command=self.exit)
         help_menu = self._doc_menu(doc, "Help")
         if help_menu is not None:
+            from .tour import TOOL_CHAPTERS
+            at = 0
+            if doc.kind in TOOL_CHAPTERS:
+                help_menu.insert_command(
+                    at, label="Tour of this tab",
+                    command=lambda: self.tour.start_for(doc))
+                at += 1
+            help_menu.insert_command(at, label="Take the guided tour",
+                                     command=self.tour.restart)
+            help_menu.insert_command(at + 1, label="Practice run",
+                                     command=self.tour.start_practice)
+            help_menu.insert_separator(at + 2)
             help_menu.add_separator()
             help_menu.add_command(label=f"About {APP_TITLE}", command=self.about)
 
@@ -427,6 +464,8 @@ class Shell:
             (doc.frame if doc is not None else self.home).focus_set()
         except tk.TclError:                         # pragma: no cover
             pass
+        if not self._restoring:
+            self.tour.document_shown(doc)
 
     def step_tab(self, delta: int) -> str:
         order: list = [None, *self.documents]
@@ -993,6 +1032,8 @@ class Shell:
 
         def next_one() -> None:
             if not pending:
+                self._restoring = False
+                self.root.after_idle(self.tour.first_run)
                 if not show_home and active:
                     doc = next((d for d in self.documents if d.path is not None
                                 and path_key(d.path) == active), None)
@@ -1030,6 +1071,7 @@ class Shell:
             self._remember_window()
             self._save_session()
         self._closed = True
+        self.tour.close()
         for job in running:
             job.stop()
         for doc in list(self.documents):

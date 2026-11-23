@@ -141,7 +141,11 @@ def test_every_pair_moves_dunnett_to_tukey():
     assert ctl.undo()
     assert not ctl.review.all_pairs and ctl.review.posthoc == "dunnett"
     assert ctl.set_comparisons(["ATX1"], False)
-    assert ctl.review.comparisons_text() == "vs control + ATX1"
+    assert "ATX1" in ctl.review.comparisons_text()
+    if ctl.cfg is not None:
+        from experiments.analysis import references
+        assert "ATX1" in references(ctl.review.final_analysis, ctl.medium)
+        assert ctl.control_name() in ("", *references(ctl.review.final_analysis, ctl.medium))
 
 
 def test_invalid_p_cutoffs_are_rejected():

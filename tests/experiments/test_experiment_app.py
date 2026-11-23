@@ -110,6 +110,59 @@ def test_a_blank_experiment_opens(root):
     assert "Error:" in findings(app)
 
 
+def test_data_review_filters_reset_and_undo(root, tree):
+    app = build(root, complete(tree))
+    panel = app.data
+    assert not panel.organization.winfo_manager()
+    panel._toggle_organization()
+    assert panel.organization.winfo_manager() == "pack"
+    panel._toggle_organization()
+    paths = panel.table.get_children()
+    app.controller.override_many([paths[0]], "plate", 9)
+    app.refresh()
+    panel.filter.set("Manually edited")
+    panel.refresh()
+    assert panel.table.get_children() == (paths[0],)
+    panel.table.selection_set(paths[0])
+    panel._selection_changed()
+    assert "Plate: manual assignment" in panel.details.cget("text")
+    panel._reset_assignments()
+    assert not panel.table.get_children()
+    app.undo()
+    assert panel.table.get_children() == (paths[0],)
+    panel.filter.set("All photos")
+    panel.search.set("does-not-exist")
+    assert not panel.table.get_children()
+    panel.search.set("")
+    assert len(panel.table.get_children()) == 4
+    app.controller.set_ignored([paths[1]], True)
+    app.refresh()
+    panel.filter.set("Ignored")
+    panel.refresh()
+    assert panel.table.get_children() == (paths[1],)
+
+
+def test_treatments_sort_by_display_name_and_keep_selection(root):
+    experiment = Experiment(conditions=[
+        Condition("GN", "Glycerol NaAsO2"),
+        Condition("G37", "Glucose + 37C"),
+        Condition("G", "Glucose"),
+        Condition("K", "Potassium acetate"),
+        Condition("GN2", "Glucose NaAsO2"),
+        Condition("Y", "glycerol"),
+    ])
+    original = deepcopy(experiment.conditions)
+    app = build(root, experiment)
+    panel = app.conditions
+    assert panel.tree.get_children() == ("G", "G37", "GN2", "Y", "GN", "K")
+    panel.tree.selection_set("GN", "G37")
+    panel.tree.focus("GN")
+    panel.refresh()
+    assert set(panel.tree.selection()) == {"GN", "G37"}
+    assert panel.tree.focus() == "GN"
+    assert app.controller.experiment.conditions == original
+
+
 def test_folder_selection_suggests_conditions_and_opens_data_review(root, tmp_path, monkeypatch):
     from experiments import app as app_module
     for temp in (30, 37):
@@ -305,7 +358,7 @@ def visible_tabs(app) -> list[str]:
 def test_a_timecourse_has_no_plate_picker(root, tree):
     """It chooses its own photographs; picking them by hand would contradict it."""
     app = build(root, complete(tree))
-    assert visible_tabs(app) == ["1. Panel", "2. Data", "3. Conditions", "4. Run"]
+    assert visible_tabs(app) == ["1. Panel", "2. Data", "3. Conditions", "4. Analysis / comparisons"]
 
 
 def test_handpicked_mode_adds_the_plate_picker(root, tree):
@@ -313,7 +366,7 @@ def test_handpicked_mode_adds_the_plate_picker(root, tree):
     e.mode = QUANTIFY
     app = build(root, e)
     assert visible_tabs(app) == ["1. Panel", "2. Data", "3. Conditions", "4. Plates",
-                                 "5. Run"]
+                                 "5. Analysis / comparisons"]
 
 
 def test_the_picker_comes_and_goes_with_the_mode(root, tree):
@@ -549,16 +602,15 @@ def test_names_are_used_for_renaming_and_photo_assignment(root, tree, monkeypatc
 
     app = build(root, handpicked(tree))
     app.conditions.tree.selection_set("GLU")
-    prompts = []
-
-    def rename(_parent, _title, prompt, initial=""):
-        prompts.append(prompt)
-        assert initial == "Glucose"
-        return "Glucose control"
-
-    monkeypatch.setattr(conditions_gui, "_ask_text", rename)
+    app.notebook.select(app.conditions)
+    root.deiconify()
+    root.update()
     app.conditions._rename()
-    assert len(prompts) == 1
+    entry = app.conditions._inline.entry
+    assert entry.get() == "Glucose"
+    entry.delete(0, "end")
+    entry.insert(0, "Glucose control")
+    app.conditions._inline.accept()
     assert app.controller.experiment.condition_codes() == ["GLU"]
     assert app.conditions.tree.set("GLU", "label") == "Glucose control"
     assert app.conditions.condition_name.cget("text") == "Glucose control"
@@ -806,7 +858,7 @@ def test_arrow_navigation_moves_up_and_down_between_strain_slots(
     assert focused == [1, 3]
 
 
-@pytest.mark.parametrize("column, editor", [("#2", "control"), ("#3", "exclude")])
+@pytest.mark.parametrize("column, editor", [("#2", None), ("#3", "exclude")])
 def test_double_click_edits_the_clicked_condition_cell(
         root, tree, monkeypatch, column, editor):
     app = build(root, complete(tree))
@@ -820,8 +872,8 @@ def test_double_click_edits_the_clicked_condition_cell(
     monkeypatch.setattr(app.conditions, "_set_exclude",
                         lambda: called.append("exclude"))
 
-    app.conditions._edit(SimpleNamespace(x=10, y=10))
-    assert called == [editor]
+    app.conditions._edit(SimpleNamespace(x=10, y=10, state=0))
+    assert called == ([editor] if editor else [])
     assert app.conditions.selected_code() == "GLU"
 
 
@@ -904,3 +956,85 @@ def test_an_unreadable_file_is_refused_with_exit_2(tmp_path):
     done = _run_module(str(bad), "--selftest")
     assert done.returncode == 2
     assert "bad.json" in done.stderr
+
+
+def test_analysis_group_selector_only_switches_groups_and_setup_owns_creation(root):
+    from experiments.model import StrainGroup
+    app = build(root, Experiment())
+    root.deiconify()
+    root.update()
+    assert not app.analysis_group.box.winfo_manager()
+    setup_buttons = [w.cget("text") for w in app.panel.group_selector.winfo_children()
+                     if isinstance(w, ttk.Button)]
+    assert "Add strain group..." in setup_buttons
+    assert not any(isinstance(w, ttk.Button)
+                   for w in app.conditions.group_selector.winfo_children())
+    assert not any(isinstance(w, ttk.Button) for w in app.analysis_group.winfo_children())
+    app.controller.experiment.strain_groups = {
+        "Group A": StrainGroup(["WT", "mut"]),
+        "Group B": StrainGroup(["EV", "other"]),
+    }
+    app.refresh()
+    assert app.analysis_group.box.winfo_manager() == "pack"
+    app.analysis_group.selected.set("Group B")
+    app.analysis_group.box.event_generate("<<ComboboxSelected>>")
+    root.update()
+    assert app.controller.active_group == "Group B"
+    assert app.conditions.group_selector.selected.get() == "Group B"
+    app.conditions.group_selector.selected.set("Group A")
+    app.conditions.group_selector.box.event_generate("<<ComboboxSelected>>")
+    root.update()
+    assert app.controller.active_group == "Group A"
+
+
+def test_analysis_tab_has_no_review_multistep_or_template_save_controls(root):
+    app = build(root, Experiment())
+    def texts(widget):
+        result = []
+        if isinstance(widget, (ttk.Button, ttk.LabelFrame)):
+            result.append(widget.cget("text"))
+        for child in widget.winfo_children():
+            result.extend(texts(child))
+        return result
+    labels = texts(app.run_tab)
+    assert "Normalization and comparison references..." in labels
+    assert not any(any(word in label.lower() for word in
+                       ("review data", "data review", "multi-step", "reusable plate template"))
+                   for label in labels)
+
+
+def test_normalization_summary_is_compact_until_comparisons_differ(root):
+    from experiments import analysis
+    e = Experiment(strains=["WT", "EV"], control_slot=1,
+                   conditions=[Condition("GLU", "Glucose"), Condition("KOAC", "Potassium Acetate")])
+    app = build(root, e)
+    assert "Normalization: WT\n" in app.run_details.cget("text")
+    e.final_analysis = analysis.validate({"normalization": {"*": 1},
+                                         "references": {"*": ["WT"], "KOAC": ["EV"]}})
+    app.refresh()
+    assert "Normalization: Glucose: WT; Potassium Acetate: WT\n" in app.run_details.cget("text")
+
+
+def test_setting_a_category_updates_in_place_without_blinking(root, tree):
+    """A category edit must not empty the table or rebuild the inspector:
+    doing so made the whole tab vanish for a moment on every change."""
+    e = complete(tree)
+    e.conditions.append(Condition("GLY", "Glycerol"))
+    app = build(root, e)
+    app.controller.add_category("Carbon source")
+    panel = app.conditions
+    panel.tree.selection_set(("GLU", "GLY"))
+    root.update()
+    box = panel._category_boxes[0]
+    excludes = panel.exclude_frame.winfo_children()
+    deleted = []
+    real_delete = panel.tree.delete
+    panel.tree.delete = lambda *items: (deleted.extend(items), real_delete(*items))
+    box.set("Glucose")
+    box.event_generate("<<ComboboxSelected>>")
+    root.update()
+    assert not deleted
+    assert panel._category_boxes[0] is box and box.winfo_exists()
+    assert panel.exclude_frame.winfo_children() == excludes
+    assert [panel.tree.set(c, "cat0") for c in ("GLU", "GLY")] == ["Glucose", "Glucose"]
+    assert app.controller.experiment.condition("GLY").category("Carbon source") == "Glucose"

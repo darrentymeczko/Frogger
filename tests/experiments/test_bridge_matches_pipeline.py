@@ -80,7 +80,7 @@ def test_the_bridge_supplies_every_argument_run_one_reads():
 
 
 def test_the_bridge_defaults_match_the_pipelines_own():
-    """An experiment run and run_timecourse.bat must configure the run alike."""
+    """An experiment run and the timecourse stage must configure the run alike."""
     parser_defaults = {}
     for action in tc.build_parser()._actions if hasattr(tc, "build_parser") else []:
         parser_defaults[action.dest] = action.default

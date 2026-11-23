@@ -186,6 +186,8 @@ def analyze(observations, settings, alpha=0.05):
                       "inference": "approximate normal/Wald" if full or repeated else "biological-block t test"}
         local_estimates, local_tests = [], []
         try:
+            if bio.empty:
+                raise ValueError("No usable biological blocks; raw observations retained")
             # Only hours at which this condition was photographed count.
             if any(bio[bio.hours == h].replicate.nunique() < 3 for h in bio.hours.unique()):
                 raise ValueError("At least three usable biological blocks are required at each hour with photos")
@@ -260,7 +262,45 @@ def analyze(observations, settings, alpha=0.05):
     return AnalysisResult(raw, contrasts, means, estimates, tests, diagnostics)
 
 
-def write_results(result, outdir, settings, alpha=0.05, baseline=None):
+def analyze_references(observations, settings, selection, alpha=0.05):
+    """Use explicit comparison references, preserving matched biological blocks.
+
+    Each unordered pair occurs once. Holm remains one family across all
+    estimable requested contrasts/timepoints within a condition, not one family
+    per reference. The normalization marker on raw observations is unchanged.
+    """
+    from experiments.analysis import references, pairs
+    parts = []
+    for condition, group in observations.groupby("condition", sort=False):
+        eligible = group[~group.qc_reason.fillna("").str.contains("strain excluded in experiment", regex=False)]
+        names = eligible.sort_values("strain_col").strain.drop_duplicates().tolist()
+        for ref, target in pairs(names, references(selection, condition), selection.get("all_pairs", False)):
+            subset = group[group.strain.isin([ref, target])].copy()
+            subset["is_control"] = subset.strain.eq(ref)
+            part = analyze(subset, settings, alpha)
+            for field in ("contrasts", "biological_means", "estimates", "tests"):
+                getattr(part, field)["comparison_reference"] = ref
+            for diagnostic in part.diagnostics:
+                diagnostic["comparison_reference"] = ref
+            parts.append(part)
+    def combined(field):
+        frames = [getattr(p, field) for p in parts]
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["comparison_reference"])
+    tests = combined("tests")
+    if not tests.empty:
+        from statsmodels.stats.multitest import multipletests
+        for _, group in tests.groupby("condition"):
+            valid = group.p.notna()
+            tests.loc[group.index, "family_size"] = int(valid.sum())
+            tests.loc[group.index, "p_holm"] = np.nan
+            if valid.any():
+                tests.loc[group.index[valid], "p_holm"] = multipletests(group.loc[valid, "p"], method="holm")[1]
+    estimates = tests[tests.test == "timepoint"].copy() if not tests.empty else combined("estimates")
+    return AnalysisResult(observations.copy(), combined("contrasts"), combined("biological_means"),
+                          estimates, tests, [d for p in parts for d in p.diagnostics])
+
+
+def write_results(result, outdir, settings, alpha=0.05, baseline=None, reference_label=None):
     """Write a new run folder, preserving previous comparison analyses."""
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=False)
@@ -269,17 +309,38 @@ def write_results(result, outdir, settings, alpha=0.05, baseline=None):
         frame.to_csv(outdir / f"{name}.csv", index=False, encoding="utf-8-sig")
     from dataclasses import asdict
     metadata = {"settings": asdict(settings), "alpha": alpha,
-                "normalization": "log(target / control) within the same template biological block, physical plate and time",
+                "normalization": "log(target / comparison reference) within the same template biological block, physical plate and time",
                 "multiple_testing": "Holm across all estimable strain/timepoint and trajectory tests within each condition",
                 "intervals": "pointwise; not simultaneous",
                 "time": "categorical fixed effects; equal weighting of selected hours for the mean contrast",
                 "diagnostics": result.diagnostics}
     (outdir / "analysis.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
-    _draw(result, outdir, settings, baseline, alpha)
+    if "comparison_reference" in result.contrasts:
+        # One figure family per reference, with the already jointly corrected
+        # p-values. The root tables retain every raw observation exactly once.
+        for i, ref in enumerate(result.contrasts.comparison_reference.drop_duplicates(), 1):
+            def subset(field):
+                data = getattr(result, field)
+                return data[data.comparison_reference == ref].drop(columns="comparison_reference").copy()
+            contrasts = subset("contrasts")
+            mask = pd.Series(False, index=result.observations.index)
+            for condition, group in contrasts.groupby("condition"):
+                mask |= (result.observations.condition.eq(condition) &
+                         result.observations.strain.isin([ref, *group.strain.unique()]))
+            raw = result.observations[mask].copy()
+            raw["normalization_is_control"] = raw.is_control
+            raw["is_control"] = raw.strain.eq(ref)
+            child = AnalysisResult(raw, contrasts, subset("biological_means"), subset("estimates"),
+                subset("tests"), [d for d in result.diagnostics if d["comparison_reference"] == ref])
+            comparable = set(result.observations.loc[result.observations.is_control, "strain"]) == {ref}
+            write_results(child, outdir / f"reference-{i}", settings, alpha,
+                          baseline if comparable else None, reference_label=ref)
+        return outdir
+    _draw(result, outdir, settings, baseline, alpha, reference_label)
     return outdir
 
 
-def _draw(result, outdir, settings, baseline, alpha):
+def _draw(result, outdir, settings, baseline, alpha, reference_label=None):
     # Figure/Agg avoids global pyplot state and works in background CLI runs.
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -336,7 +397,7 @@ def _draw(result, outdir, settings, baseline, alpha):
             if baseline is not None and not baseline.empty and {"treatment", "hours"} <= set(baseline):
                 ticks.update(baseline.loc[baseline.treatment == condition, "hours"].dropna())
             ax.set_xticks(sorted(ticks))
-            ax.set_ylabel("Growth / matched control (log scale)")
+            ax.set_ylabel("Growth / matched reference (log scale)")
             ax.set_yscale("log")
             ax.spines[["top", "right"]].set_visible(False)
             ax.margins(y=.4, x=.15)
@@ -346,7 +407,8 @@ def _draw(result, outdir, settings, baseline, alpha):
                 ax.legend(unique.values(), unique.keys(), fontsize=7, loc="lower left")
         for ax in axes[len(strains):]:
             ax.set_visible(False)
-        title = (f"{condition} | {settings.method.replace('_', ' ')} | "
+        reference_text = f" vs {reference_label}" if reference_label else ""
+        title = (f"{condition}{reference_text} | {settings.method.replace('_', ' ')} | "
                  f"{'technical plates + repeated timepoints' if settings.scope == 'repeated' else 'technical plates'}")
         fig.suptitle(textwrap.fill(title, max(38, int(fig.get_figwidth() * 9))), fontsize=12)
         footer = (f"Grey: biological-block technical means. Teal: estimate and {100 * (1-alpha):g}% pointwise CI. "

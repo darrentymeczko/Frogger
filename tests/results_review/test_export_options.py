@@ -183,7 +183,7 @@ def test_montages_are_drawn_together_and_a_failure_is_named(chosen, tmp_path,
     monkeypatch.setattr(rb, "rows_for", lambda cand, cfg=None: (0,))
     monkeypatch.setattr(rb, "layout_for", lambda cfg: None)
     monkeypatch.setattr(tc, "montage_job",
-                        lambda cand, rows, strains, out, cache, experiment, layout:
+                        lambda cand, rows, strains, out, cache, experiment, layout, measurement:
                         (experiment, Path(out)))
     passes = []
 
@@ -481,11 +481,15 @@ def test_export_button_schedules_a_fixed_snapshot_or_cancels(chosen, monkeypatch
     calls, jobs = [], []
     ctl = SimpleNamespace(can_edit=True, run=run, review=review,
                           capture_root=Path("photos"), cfg={"strains": ["Control"]},
+                          set_included=review.set_included,
+                          set_presentation=lambda value: setattr(review, "presentation", value),
                           save=lambda: calls.append("save"), data_flags=lambda: None)
     app = SimpleNamespace(_busy=False, ctl=ctl, winfo_toplevel=lambda: None,
                           sheet=SimpleNamespace(view="aligned", rotated=True),
                           _run_async=lambda work, done, text: jobs.append(work),
-                          _exported=lambda result: None, _progress=lambda message: None)
+                          _exported=lambda result: None, _progress=lambda message: None,
+                          _measure_first=lambda then: False)  # Every photo set measured already.
+    app._export_saved = lambda request: ReviewApp._export_saved(app, request)
     exported = []
     monkeypatch.setattr(ex, "export_review", lambda *a, **k: exported.append((a, k)))
     ReviewApp._export(app)
@@ -505,3 +509,5 @@ def test_export_button_schedules_a_fixed_snapshot_or_cancels(chosen, monkeypatch
     assert args[2] == ["GLY"]
     assert args[4] == {"strains": ["Control"]}
     assert kwargs["options"] == only(powerpoint=True)
+    assert args[1].presentation["export"]["powerpoint"] is True
+    assert args[1].presentation["export"]["data"] is False

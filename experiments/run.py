@@ -109,15 +109,22 @@ def to_pipeline_config(e: Experiment) -> dict:
     """
     if e.strain_groups:
         raise RunError("Choose a single strain-group view before building a pipeline config.")
+    from . import analysis
+    final = analysis.for_experiment(e)
+    analysis.check_panel(final, e.strains, e.condition_codes(),
+                         {c.code: c.exclude for c in e.conditions})
     media = {}
     for c in e.conditions:
         media[c.code] = {
             "control_col": e.control_for(c.code),
             "exclude": list(c.exclude),
         }
+    from src.spotting_roi import ROISettings
     return {
+        "measurement": ROISettings().to_dict(),
         "strains": list(e.strains),
-        "control_col": e.control_slot,
+        "control_col": final["normalization"].get("*"),
+        "final_analysis": final,
         "exclude": [],
         "from_set": e.set_key or "",
         "media": media,
@@ -240,7 +247,13 @@ def default_results_dir(e: Experiment) -> Path:
     """
     sb, tc = _pipeline()
     root = sb.TIMECOURSE_RESULTS if e.is_timecourse else sb.MAIN_RESULTS
-    return root / tc.safe_dirname(e.name)
+    target = root / tc.safe_dirname(e.name)
+    if (target / "run.json").exists():
+        index = 2
+        while (root / f"{target.name} - Run {index}").exists():
+            index += 1
+        return root / f"{target.name} - Run {index}"
+    return target
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +367,7 @@ def _cache_tag(sb) -> str:
 #: its own argument parser defaults to. Built explicitly rather than by calling
 #: that parser, so that a new pipeline flag surfaces as a clear AttributeError
 #: here rather than as a silently different default -- and `rank_by` in
-#: particular stays "combined", matching run_timecourse.bat, so an experiment
+#: particular stays "combined", matching the timecourse stage, so an experiment
 #: run and a console run rank candidates identically.
 #: `tests/experiments/test_matches_pipeline.py` asserts this set stays in step.
 RUN_ONE_ARGS = {
@@ -391,6 +404,8 @@ def run(e: Experiment, *, outdir: Path | None = None, estimate: bool = False,
     if res is None:
         res = prepare(e)
     outdir = Path(outdir) if outdir else default_results_dir(e)
+    if (outdir / "run.json").exists():
+        raise RunError("This folder is an independently saved result run. Choose a new output folder.")
     flagged = review_plates(review)
 
     if e.strain_groups:
@@ -418,6 +433,10 @@ def run(e: Experiment, *, outdir: Path | None = None, estimate: bool = False,
         return next((code for code in codes if code), 0)
 
     handoff = {"review": review, "review_path": review_path}
+    # Both handpicked and timecourse calculations must use finalized references.
+    from .analysis import for_experiment, check_panel
+    check_panel(for_experiment(e), e.strains, e.condition_codes(),
+                {c.code: c.exclude for c in e.conditions})
     if e.mode == TIMECOURSE:
         runner = lambda: _run_timecourse(e, res, outdir, estimate=estimate,
                                          workers=workers, template=template,
@@ -525,6 +544,8 @@ def measure_multi_step(e, res, template, review=None):
                 "hours": row.timepoint, "dilution": e.multi_step.dilution,
                 "image": row.relpath, "row": cell.row + 1, "column": cell.col + 1,
                 "raw_growth": float(data.net[cell.row, cell.col]) if data is not None else np.nan,
+                **(data.measurement_fields(cell.row, cell.col)
+                   if data is not None and hasattr(data, "measurement_fields") else {}),
                 "detection_limit": floor, "is_control": cell.slot == e.control_for(row.condition),
                 "qc_reason": "; ".join(reasons)})
         print(f"  Multi-step measurements: {n}/{len(selected)}", flush=True)
@@ -581,7 +602,8 @@ def _run_multi_step_once(e, res, outdir, settings, observations, include_baselin
     import spotting_multistep as multi
     from .multistep import to_dict
     print("  Fitting additional multi-step analysis ...", flush=True)
-    result = multi.analyze(observations, settings, e.statistics.alpha)
+    result = (multi.analyze_references(observations, settings, e.final_analysis, e.statistics.alpha)
+              if e.final_analysis else multi.analyze(observations, settings, e.statistics.alpha))
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     destination = Path(outdir) / "multi_step" / f"{stamp}-{settings.scope}-{settings.method}{suffix}"
     baseline = _multi_step_baseline(e, res, outdir) if include_baseline else None
@@ -637,10 +659,15 @@ def _run_timecourse(e, res, outdir, *, estimate, workers, template=None,
     figures = "none" if e.output == DATA_OUTPUT else None
     args = _timecourse_args(outdir, estimate=estimate, workers=workers,
                             figures=figures)
+    if not estimate:
+        # run_one only honours `out` when it is already a folder, and would
+        # otherwise write to Results/Timecourse/<name> -- away from the
+        # handoff files written to `outdir` below.
+        Path(outdir).mkdir(parents=True, exist_ok=True)
     _configure_timecourse_workers(tc, args)
 
     code = tc.run_one(tree, args, cfg, multi=False, shots=shots, layout=layout,
-                      statistics=e.statistics.plot_kwargs())
+                      statistics=e.statistics_kwargs())
     if code == 0 and not estimate:
         write_handoff(e, res, outdir, layout=layout, review=review,
                       review_path=review_path)
@@ -656,7 +683,7 @@ REVIEW_NAME = "review.json"
 def seed_review_statistics(e: Experiment, outdir: Path) -> Path:
     """Start the review tool on the tests this run's figures were drawn with.
 
-    Only the `statistics` block is written; picks and spot edits already in a
+    Statistical and final reference choices are written; picks and spot edits already in a
     `review.json` are kept. Without this the review tool would open on its own
     defaults and disagree with the figures it is showing.
     """
@@ -671,6 +698,8 @@ def seed_review_statistics(e: Experiment, outdir: Path) -> Path:
             data = loaded
     data.setdefault("version", 1)
     data["statistics"] = e.statistics.review_dict()
+    from .analysis import for_experiment
+    data["final_analysis"] = for_experiment(e)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
@@ -768,6 +797,8 @@ def build_tidy(e: Experiment, template, code: str, plates) -> "object":
     import pandas as pd
     import spotting_quant as sq
 
+    from .analysis import for_experiment, check_panel
+    check_panel(for_experiment(e), e.strains, [code], {code: e.exclude_for(code)})
     control = e.control_for(code)
     dropped = set(e.exclude_for(code))
     experiment = f"{e.name} {code}" if e.set_key is None else f"Set {e.set_key} {code}"
@@ -792,6 +823,8 @@ def build_tidy(e: Experiment, template, code: str, plates) -> "object":
                 "strain_col": placement.sample_slot,
                 "strain": name,
                 "raw_growth": float(data.net[r, c]),
+                **(data.measurement_fields(r, c) if hasattr(data, "measurement_fields") else {}),
+                "analysis_condition": code,
                 "artifact": bool(data.rim[r, c]),
                 "excluded": placement.sample_slot in dropped,
                 "is_control": placement.sample_slot == control,
@@ -805,7 +838,7 @@ def build_tidy(e: Experiment, template, code: str, plates) -> "object":
     if control in dropped or keep.empty:
         print(f"    ! {experiment}: the control was excluded; "
               f"skipping normalisation for this condition.")
-        return full
+        return sq.unavailable_growth(full, "no_included_control")
 
     # Whether a control can serve as a denominator depends on this plate's own
     # measurement noise. Copied from `spotting_batch.build_tidy`, comment and
@@ -820,7 +853,12 @@ def build_tidy(e: Experiment, template, code: str, plates) -> "object":
                                   min_control=min_control)
     key = ["experiment", "replicate", "strain_col"]
     added = [c for c in keep.columns if c not in full.columns]
-    return full.merge(keep[key + added], on=key, how="left")
+    out = full.merge(keep[key + added], on=key, how="left")
+    out["control_ok"] = out["control_ok"].fillna(False).astype(bool)
+    out.loc[out["excluded"], "normalization_reason"] = "excluded_by_user"
+    out.loc[out["excluded"], "growth_quality"] = sq.unavailable_growth(
+        out.loc[out["excluded"]], "excluded_by_user")["growth_quality"]
+    return out
 
 
 def resolved_level(e: Experiment, template, code: str, plate_id) -> int | None:
@@ -834,19 +872,13 @@ def load_template(e: Experiment):
     Handpicked quantification cannot run without it: which rows hold which
     dilution level is a property of the design, not of the photograph.
     """
-    if not e.template_path:
-        return None
-    from plate_template.schema import TemplateError, load
+    from plate_template.schema import TemplateError
+    from .layout import pin
 
-    # BUNDLE last: the default template ships inside the .exe, not beside it.
-    for candidate in (Path(e.template_path), REPO / e.template_path,
-                      BUNDLE / e.template_path):
-        if candidate.exists():
-            try:
-                return load(candidate)
-            except TemplateError:
-                return None
-    return None
+    try:
+        return pin(e)
+    except TemplateError:
+        return None
 
 
 def _run_quantify(e, res, outdir, *, estimate, template=None, review=None,
@@ -967,6 +999,7 @@ def _run_quantify(e, res, outdir, *, estimate, template=None, review=None,
     tidy.to_csv(csv_path, index=False, encoding="utf-8-sig")
     print(f"\n  wrote {csv_path}")
 
+    seed_review_statistics(e, outdir)
     if e.output == DATA_OUTPUT:
         # The CSV already holds both raw_growth (grey value) and
         # relative_growth (normalised to the control); nothing is drawn.
@@ -974,7 +1007,7 @@ def _run_quantify(e, res, outdir, *, estimate, template=None, review=None,
         write_handoff(e, res, outdir, review=review, review_path=review_path)
         return 0
 
-    sb.run_plots(csv_path, outdir, **e.statistics.plot_kwargs())
+    sb.run_plots(csv_path, outdir, **e.statistics_kwargs())
     sb.write_condition_matrix(outdir)
     write_handoff(e, res, outdir, review=review, review_path=review_path)
     return 0

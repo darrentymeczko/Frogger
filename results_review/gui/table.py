@@ -18,6 +18,9 @@ different claims, and only the first is the correct undo.
 The strain summary beside the table is the immediate feedback loop: excluding a
 control spot changes the divisor for the whole plate, and the means move as soon
 as it is done, before the graph is redrawn.
+
+Selecting a row reports it (`on_select`), so the sheet can mark that spot on
+the montage; `select_spot` is the way back, from a spot clicked there.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ import tkinter as tk
 from tkinter import simpledialog, ttk
 from typing import Callable
 
-from .. import theme
+from .. import spotmap, theme
 
 #: The number the user types in is a background-subtracted grey value. Negative
 #: is physically meaningless (the spot would be darker than the agar around it)
@@ -47,18 +50,22 @@ class SpotTable(ttk.Frame):
 
     def __init__(self, master, on_raw: Callable, on_outlier: Callable,
                  on_note: Callable, on_revert: Callable,
+                 on_select: "Callable | None" = None,
                  **kw) -> None:
         super().__init__(master, **kw)
         self.on_raw = on_raw
         self.on_outlier = on_outlier
         self.on_note = on_note
         self.on_revert = on_revert
+        #: Called with the selected row (a dict), or None when there is none.
+        self.on_select = on_select
 
         self.rowconfigure(1, weight=1)
         self.columnconfigure(0, weight=1)
 
         self.hint = ("Double-click a grey value to re-measure · O toggles outlier · "
-                     "N adds a note · Backspace reverts")
+                     "N adds a note · Backspace reverts · click a spot above to "
+                     "find its row")
         self.hint_label = ttk.Label(self, text=self.hint, font=theme.FONT_SMALL,
                                     foreground=theme.MUTED, anchor="w")
         self.hint_label.grid(row=0, column=0, sticky="ew", padx=theme.PAD)
@@ -130,7 +137,8 @@ class SpotTable(ttk.Frame):
         # blank label using the same font and top gap as its candidate-count
         # label keeps the two bottom edges aligned even when Windows display
         # scaling changes the label height.
-        self.bottom_gutter = ttk.Label(self, text="", font=theme.FONT_SMALL)
+        self.bottom_gutter = ttk.Label(self, text="", font=theme.FONT_SMALL,
+                                       wraplength=850, justify="left")
         self.bottom_gutter.grid(row=2, column=0, sticky="ew",
                                 pady=(theme.GAP - 1, 0))
 
@@ -144,6 +152,7 @@ class SpotTable(ttk.Frame):
         self.tree.bind("<KeyPress-N>", self._edit_note)
         self.tree.bind("<BackSpace>", self._revert)
         self.tree.bind("<Button-3>", self._context)
+        self.tree.bind("<<TreeviewSelect>>", self._show_quality)
 
     # -- contents ------------------------------------------------------------
 
@@ -155,6 +164,9 @@ class SpotTable(ttk.Frame):
             foreground={"error": theme.ERROR, "warn": theme.WARNING}.get(
                 kind, theme.MUTED))
         self.message.grid(row=1, column=0, sticky="nsew", padx=theme.PAD)
+        self._rows.clear()
+        if self.on_select is not None:
+            self.on_select(None)
 
     def show(self, rows: list[dict], summary: list[dict]) -> None:
         self._cancel_edit()
@@ -181,6 +193,10 @@ class SpotTable(ttk.Frame):
             self.tree.selection_set(keep[0])
         elif self._rows:
             self.tree.selection_set(next(iter(self._rows)))
+        # Re-selecting the row that was already selected raises no event, yet
+        # the row is now a different candidate's; the sheet must hear of it.
+        if self.on_select is not None:
+            self.on_select(self._selected())
 
         # Spots flagged in the data review are only marked, never dropped: say
         # so above the table, where the decision to omit one is made.
@@ -205,8 +221,34 @@ class SpotTable(ttk.Frame):
             tags = ("significant",) if s.get("significant") else ()
             self.summary.insert("", "end", tags=tags,
                                 values=(s["strain"], s["n"],
-                                        f"{s['mean']:.3f} ± {s['sd']:.3f}",
+                                        f"{_fmt(s['mean'], '.3f')} ± {_fmt(s['sd'], '.3f')}",
                                         _fmt_p(s.get("p_value"))))
+
+    def _show_quality(self, _event=None):
+        selected = self.tree.selection()
+        row = self._rows.get(selected[0]) if selected else None
+        self.bottom_gutter.configure(text=theme.flag_text(row) if row else "")
+        if self.on_select is not None:
+            self.on_select(row)
+
+    @property
+    def rows(self) -> list:
+        """Every row the table is showing, in no particular order."""
+        return list(self._rows.values())
+
+    def select_spot(self, slot: int, replicate: int) -> bool:
+        """Select the row of one spot -- one clicked on the montage.
+
+        False when the table has no row for it.
+        """
+        for iid, row in self._rows.items():
+            if spotmap.row_key(row) == (int(slot), int(replicate)):
+                self._cancel_edit()
+                self.tree.selection_set(iid)
+                self.tree.focus(iid)
+                self.tree.see(iid)
+                return True
+        return False
 
     def _place_sash(self, event=None) -> None:
         """Give the summary its full width once, then leave the sash alone.
@@ -348,12 +390,12 @@ class SpotTable(ttk.Frame):
         self._begin_edit(None)
 
 
-def _fmt(v) -> str:
+def _fmt(v, spec=".2f") -> str:
     try:
         f = float(v)
     except (TypeError, ValueError):
         return "—"
-    return "—" if f != f else f"{f:.2f}"       # f != f catches NaN
+    return "—" if f != f else format(f, spec)       # f != f catches NaN
 
 
 def _fmt_p(value) -> str:

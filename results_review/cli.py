@@ -39,27 +39,38 @@ def _report(run, review: Review, frames, problems) -> None:
 
 
 def run_one(results_dir: Path, *, figures: bool = True, montages: bool = True,
-            dry_run: bool = False) -> int:
+            dry_run: bool = False, photos: Path | None = None) -> int:
     run = discovery.load_set(results_dir)
     review = rv.with_defaults(run, rv.load_for(run))
-
-    root = links.resolve(run.label, review.capture_root, run.results_dir)
+    from .gui.controller import ReviewController
+    ctl = ReviewController(run, review)
+    if photos is not None:
+        ok, message = ctl.link_photos(photos)
+        if not ok:
+            print(f"  ! {run.label}: {message}", file=sys.stderr)
+            return 1
+    root = ctl.capture_root
+    for problem in ctl.source_problems():
+        print(f"  ! {run.label}: {problem}", file=sys.stderr)
     if root is None:
         print(f"  ! {run.label}: the capture folder is not linked and could "
               f"not be found. Open it once in the window, or pass --photos.",
               file=sys.stderr)
         return 1
-    try:
-        cfg = links.load_config(root)
-    except Exception as e:
-        print(f"  ! {run.label}: {e}", file=sys.stderr)
+    cfg = ctl.cfg
+    if cfg is None:
+        print(f"  ! {run.label}: {ctl.config_error}", file=sys.stderr)
         return 1
+    if dry_run:
+        cfg = {**cfg, "_run_read_only": True}
 
     from .datareview import load_flags
 
     flags = load_flags(run)
     frames, problems = [], []
     for medium in run.media:
+        if not review.is_included(medium):
+            continue
         cand = rv.chosen_candidate(run, review, medium)
         if cand is None:
             problems.append(f"{medium}: the recorded pick is not in this run")
@@ -123,13 +134,13 @@ def main(argv=None) -> int:
             print("  --photos applies to a single set; name one.",
                   file=sys.stderr)
             return 1
-        links.remember(discovery.load_set(targets[0]).label, args.photos)
 
     bad = 0
     for target in targets:
         try:
             bad += run_one(target, figures=not args.no_figures,
-                           montages=not args.no_montages, dry_run=args.dry_run)
+                           montages=not args.no_montages, dry_run=args.dry_run,
+                           photos=args.photos)
         except Exception as e:
             print(f"  ! {target}: {type(e).__name__}: {e}", file=sys.stderr)
             bad += 1

@@ -226,7 +226,7 @@ def test_timecourse_run_gives_each_group_only_its_positions(bench, tmp_path, mon
 
     def score(tree, args, cfg, **kwargs):
         seen[tree.set_hint] = sorted((s.path.name, s.plate) for s in kwargs["shots"])
-        args.out.mkdir(parents=True)
+        args.out.mkdir(parents=True, exist_ok=True)
         (args.out / discovery.CANDIDATES_CSV).write_text(CANDIDATES, encoding="utf-8")
         return 0
 

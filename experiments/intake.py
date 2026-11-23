@@ -34,6 +34,7 @@ from .profiles import (
     PLATE_PATTERNS,
     FacetRule,
     NamingProfile,
+    apply_keywords,
     apply_profile,
     builtin,
     condition_code,
@@ -677,9 +678,10 @@ def resolve(e: Experiment, files: list[ImageFile]) -> Resolution:
     """Decide what every photo is, under this experiment's profile and overrides.
 
     Precedence is fixed and total: `ignored` beats `overrides`, which beat the
-    photo order, which beats the profile. Overrides are keyed on the relative
-    path, so re-scanning after a few more photos arrive re-reads the layout
-    without touching a single hand correction.
+    keyword rules, which beat the photo order, which beats the profile.
+    Overrides are keyed on the relative path, so re-scanning after a few more
+    photos arrive re-reads the layout without touching a single hand
+    correction.
     """
     required = INFER_FACETS.get(e.mode, ())
     if e.strain_groups:
@@ -716,6 +718,10 @@ def resolve(e: Experiment, files: list[ImageFile]) -> Resolution:
             facets["plate"] = slot.plate
             if slot.group is not None:
                 facets["set"] = slot.group
+        for facet, value in apply_keywords(f.parts, e.keywords).items():
+            if facet == "condition":
+                facets.pop("condition_label", None)
+            facets[facet] = value
         for facet, value in e.overrides.get(f.relpath, {}).items():
             if facet.endswith("_label"):
                 facets[facet] = str(value)

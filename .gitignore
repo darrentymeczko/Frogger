@@ -84,3 +84,13 @@ workbench_error.log
 # Scratch output from test and verification runs: rendered previews, temp
 # experiments and logs. Reproducible, and not source.
 validation/
+
+# ---------------------------------------------------------------------------
+# The guided tour's practice data
+# ---------------------------------------------------------------------------
+# `Practice/` is the copy the tour makes in the project folder: reproducible.
+# `workbench/practice/` is what it copies FROM, and has to ship with the
+# program -- eight half-size photographs and their precomputed results -- so
+# it is the one exception to "no photos, no results" above.
+/Practice/
+!workbench/practice/**

@@ -69,10 +69,12 @@ class Explorer(ttk.Frame):
 
         self.tree.bind("<Double-Button-1>", self._activate)
         self.tree.bind("<Return>", self._activate)
+        self.tree.bind("<F2>", self._rename_selected)
         self.tree.bind("<Button-3>", self._menu)
 
         self.menu = tk.Menu(self, tearoff=False)
         self.menu.add_command(label="Open", command=self._open_selected)
+        self.menu.add_command(label="Rename display name...", accelerator="F2", command=self._rename_selected)
         self.menu.add_command(label="Show in folder", command=self._reveal_selected)
         self.menu.add_command(label="Copy path", command=self._copy_selected)
 
@@ -123,6 +125,14 @@ class Explorer(ttk.Frame):
         got = self._selected()
         if got is not None:
             self.shell.open_document(*got)
+
+    def _rename_selected(self, event=None):
+        got = self._selected()
+        if got is not None:
+            doc = self.shell.open_document(*got)
+            if doc is not None and "rename" in doc.commands:
+                doc.commands["rename"]()
+        return "break"
 
     def _reveal_selected(self) -> None:
         got = self._selected()

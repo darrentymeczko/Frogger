@@ -175,25 +175,29 @@ class PlateSlot:
         """The (sample_slot, replicate) pairs spotted on this plate."""
         return {(p.sample_slot, p.replicate) for _, _, p in self.placements()}
 
-    def scorable_dilutions(self) -> set[int]:
+    def scorable_dilutions(self, controls=()) -> set[int]:
         """Dilution levels at which this plate could actually be quantified.
 
         The pipeline scores one dilution level per plate and relativises every
         spot to the control on that same plate, so a level is only usable when
-        every unit present on the plate has a spot at it and the control is
-        among them.
+        every unit present on the plate has a spot at it and each slot in
+        `controls` is among them.
+
+        The control is the experiment's choice (final Analysis normalization),
+        not the template's, so the caller passes it in. The plate's own
+        `control_slot` is a legacy field and deliberately not consulted: a
+        design drawn without one is still perfectly quantifiable.
         """
-        if self.control_slot is None:
-            return set()
         all_units = self.units()
         by_dilution: dict[int, set[tuple[int, int]]] = {}
         for _, _, p in self.placements():
             by_dilution.setdefault(p.dilution, set()).add((p.sample_slot, p.replicate))
+        wanted = set(controls)
         return {
             d
             for d, present in by_dilution.items()
             if present == all_units
-            and any(slot == self.control_slot for slot, _ in present)
+            and wanted <= {slot for slot, _ in present}
         }
 
 

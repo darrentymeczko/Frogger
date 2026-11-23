@@ -8,12 +8,11 @@ photographs are -- everything a photograph cannot tell you.
 
 Five tabs, starting with the plate template before importing photographs:
 
-    1. Panel       bind a plate template, name each slot, pick the control
+    1. Panel       bind a plate template and name each slot
     2. Data        link a folder, review parsing and correct its organization
-    3. Conditions  the media, and any per-condition control override
+    3. Conditions  the media and per-condition exclusions
     4. Plates      choose photographs for handpicked quantification
-    5. Run         handpicked quantification or the time course, and the
-                   statistical tests the figures report
+    5. Analysis / comparisons  normalization, statistical references and run
 
 Validation findings are listed when Run quantification is pressed, with the
 choice to go ahead anyway.
@@ -101,13 +100,16 @@ QUICK_START = """\
 A plate template describes the SHAPE of the assay. An experiment says what was
 actually on it, and where the photographs of it are.
 
-Start on Panel to choose and preview the plate template. Then import the
+Start on Panel to create a layout or copy a reusable template. Then import the
 photographs on Data, selecting the folder for one experiment.
 
-  1. Panel -- choose the plate template, name each sample slot, and mark the
-     positive control. Leave a slot blank if nothing was spotted there.
+  1. Panel -- Create layout, or Copy from template, and name each sample slot.
+     Use layout in experiment accepts a draft without saving a template file.
+     Edit layout makes a separate draft; applying it is one undo step.
+     The experiment embeds its layout, so external template edits cannot change it.
+     Leave a slot blank if nothing was spotted there.
      For multiple strain groups, Add strain group, then select each group here
-     and fill its own strains and control. All groups use this plate template.
+     and fill its own strains. All groups use this plate template.
 
   2. Data -- linking a folder suggests conditions from folders and filenames.
      Each photo shows the evidence and any missing plate or elapsed hours.
@@ -120,11 +122,9 @@ photographs on Data, selecting the folder for one experiment.
 
   3. Conditions -- review the suggested treatment names; edit, add or remove
      any errors. Treatments are suggested even when plates/hours are unknown.
-     A condition can name its OWN
-     control, which is what you want when a strain does not grow on one medium
-     and so cannot be the reference there.
-     With multiple groups, the group selector chooses whose controls and
-     exclusions you are editing; treatment names are shared.
+     With multiple groups, the group selector chooses whose exclusions you
+     are editing; treatment names are shared. References are chosen in the
+     final Analysis / comparisons tab.
 
   4. Plates -- handpicked quantification only. One row per plate the template
      needs. Select a row, flip through the photographs on the left, and press
@@ -139,7 +139,13 @@ photographs on Data, selecting the folder for one experiment.
      camera dump names every file the same thing, and guessing would mislabel
      biological replicates without saying so.
 
-  5. Run (4 in time-course mode) -- say which edge is the experiment's top.
+  5. Analysis / comparisons (4 in time-course mode) -- select normalization
+     and separate statistical comparison references for each condition and group.
+     WT and EV start checked when those strain names are present.
+     Select comparison references using the checkboxes, then Apply.
+     Normalization must be finalized to run.
+
+     Say which edge is the experiment's top.
      This lets a plate photographed sideways or upside down use the same plate
      template. A time course then scores every timepoint, every re-shot pairing
      and every dilution in the template, then ranks them; it reads the folder
@@ -147,8 +153,8 @@ photographs on Data, selecting the folder for one experiment.
 
      The Statistics box chooses the tests every figure reports: ratio paired
      t-tests (with an optional correction) or a one-way ANOVA (with a post-hoc
-     test), the p cutoff, and which strains are compared. The review tool
-     opens on the same choices and can still change them.
+     test) and the p cutoff. The review tool opens on the same choices and
+     can still change them; changed references invalidate dependent results.
 
      Output chooses between full results and data only. Data only skips
      every graph, chart and statistic and writes just the per-spot CSV
@@ -177,7 +183,7 @@ MODE_TEXT = {
         "photos and every dilution level is scored and ranked, and one "
         "candidate per condition is proposed.\n\n"
         "Ranking weighs both the spread across replicates and how many "
-        "strains differ from the control, counted with the test chosen under "
+        "requested comparisons are significant, counted with the test chosen under "
         "Statistics. That is selecting partly on the outcome, so the "
         "proposal is a place to start: check the winner by eye before "
         "reporting it."
@@ -209,8 +215,16 @@ class ExperimentApp:
         #: The running quantification (a `uikit.host.JobHandle`), if any.
         self._run_process = None
         self._run_poll: str | None = None
+        #: () -> bool, set by the workbench's practice run: called instead of
+        #: starting a quantification, and true when it has dealt with the run.
+        self.run_override = None
+        self._layout_editor = None
+        unsaved_layout = path is None and experiment.template_snapshot is not None
         self.controller =ExperimentController(experiment, on_change=self.refresh)
         self.controller.load_template(path.parent if path else None)
+        self.controller.mark_saved(notify=False)
+        if unsaved_layout:
+            self.controller.mark_unsaved()
 
         self.host.set_title(APP_TITLE)
         self._size_window()
@@ -222,7 +236,8 @@ class ExperimentApp:
         self.host.on_dispose(self._dispose)
         # For the surrounding program's own toolbar, when there is one.
         for name, action in (("save", self.save_file), ("undo", self.undo),
-                             ("redo", self.redo),
+                             ("redo", self.redo), ("save_as", self.save_file_as),
+                             ("rename", self.rename),
                              ("run", self._run_quantification)):
             self.host.add_command(name, action)
 
@@ -249,7 +264,9 @@ class ExperimentApp:
                               command=self.open_file)
         file_menu.add_separator()
         file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.save_file)
-        file_menu.add_command(label="Save As...", command=self.save_file_as)
+        file_menu.add_command(label="Save As...", accelerator="Ctrl+Shift+S", command=self.save_file_as)
+        file_menu.add_command(label="Save reusable plate template...",
+                              command=self.save_layout_template)
         file_menu.add_separator()
         file_menu.add_command(label="Import existing configuration...",
                               command=self.import_config)
@@ -261,17 +278,24 @@ class ExperimentApp:
         edit_menu.add_command(label="Undo", accelerator="Ctrl+Z", command=self.undo)
         edit_menu.add_command(label="Redo", accelerator="Ctrl+Y", command=self.redo)
         edit_menu.add_separator()
-        edit_menu.add_command(label="Rename experiment...", command=self.rename)
+        edit_menu.add_command(label="Rename selected item...", accelerator="F2", command=self.rename_selected)
         self.edit_menu = edit_menu
 
         help_menu = self.host.add_menu("Help")
+        from uikit.shortcuts import show_help
+        help_menu.add_command(label="Keyboard shortcuts", command=lambda: show_help(self.root))
         help_menu.add_command(label="Quick start", command=self.quick_start)
+        from uikit.data_organization import show_data_organization
+        help_menu.add_command(label="Photograph and folder organization",
+                              command=lambda: show_data_organization(self.root))
         help_menu.add_command(label="About", command=self._about)
 
         for sequence, action in (
             ("<Control-n>", self.new_experiment),
             ("<Control-o>", self.open_file),
             ("<Control-s>", self.save_file),
+            ("<Control-Shift-S>", self.save_file_as),
+            ("<F2>", self.rename_selected),
             ("<Control-z>", self.undo),
             ("<Control-y>", self.redo),
         ):
@@ -283,6 +307,13 @@ class ExperimentApp:
         Only a Text widget with native undo enabled owns its undo shortcut.
         """
         widget = self.root.focus_get()
+        from uikit.shortcuts import editing
+        readonly_choice = (isinstance(widget, ttk.Combobox)
+                           and str(widget.cget("state")) == "readonly")
+        if ((action == self.rename_selected and editing(widget))
+                or (action in (self.undo, self.redo) and editing(widget)
+                    and not readonly_choice)):
+            return None
         if (action in (self.undo, self.redo) and isinstance(widget, tk.Text)
                 and widget.cget("undo")):
             return ""
@@ -313,7 +344,8 @@ class ExperimentApp:
         self.notebook.pack(side="top", fill="both", expand=True,
                            padx=8, pady=(8, 4))
 
-        self.panel = StrainPanel(self.notebook, self.controller, self.refresh)
+        self.panel = StrainPanel(self.notebook, self.controller, self.refresh,
+                                 on_edit_layout=self.edit_layout)
         self.data = DataPanel(self.notebook, self.controller, self.refresh, self.choose_photos)
         self.conditions = ConditionsPanel(self.notebook, self.controller, self.refresh)
         self.plates = PlatePicker(self.notebook, self.controller, self.refresh)
@@ -323,7 +355,7 @@ class ExperimentApp:
         self.notebook.add(self.data, text="2. Data")
         self.notebook.add(self.conditions, text="3. Conditions")
         self.notebook.add(self.plates, text="4. Plates")
-        self.notebook.add(self.run_tab, text="5. Run")
+        self.notebook.add(self.run_tab, text="5. Analysis / comparisons")
 
     def _sync_tabs(self) -> None:
         """Show the plate picker only where it means something.
@@ -347,7 +379,7 @@ class ExperimentApp:
         elif not wanted and not hidden:
             self.notebook.hide(self.plates)
         self.notebook.tab(self.run_tab,
-                          text="5. Run" if wanted else "4. Run")
+                          text="5. Analysis / comparisons" if wanted else "4. Analysis / comparisons")
 
     def _build_run_tab(self, master) -> ttk.Frame:
         frame = ttk.Frame(master, padding=(10, 8))
@@ -409,6 +441,12 @@ class ExperimentApp:
         )
         self.run_summary.pack(anchor="w", fill="x")
 
+        from .gui.groups import GroupSelector
+        self.analysis_group = GroupSelector(readiness, self.controller, self.refresh, allow_add=False)
+        self.analysis_group.pack(fill="x", pady=(8, 0))
+        self.analysis_button = ttk.Button(readiness, text="Normalization and comparison references...",
+                                          command=self._choose_final_analysis)
+        self.analysis_button.pack(fill="x", pady=(8, 0))
         bar = ttk.Frame(readiness)
         bar.pack(anchor="w", pady=(16, 0))
         self.estimate_button = ttk.Button(bar, text="How long would this take?",
@@ -424,14 +462,6 @@ class ExperimentApp:
             readiness, text="", foreground=tokens.TEXT_MUTED, justify="left",
         )
         self.run_details.pack(anchor="w", fill="x", pady=(5, 0))
-
-        review = ttk.LabelFrame(readiness, text="Data review", padding=(10, 8))
-        review.pack(fill="x", pady=(14, 0))
-        self.data_review_note = ttk.Label(review, text="", justify="left",
-                                          wraplength=320)
-        self.data_review_note.pack(anchor="w", fill="x")
-        ttk.Button(review, text="Review data...",
-                   command=self._review_data).pack(anchor="w", pady=(8, 0))
 
         self._build_statistics(readiness).pack(fill="x", pady=(14, 0))
 
@@ -489,19 +519,16 @@ class ExperimentApp:
         self.alpha_entry.bind("<Return>", self._alpha_changed)
         self.alpha_entry.bind("<FocusOut>", self._alpha_changed)
 
-        ttk.Label(frame, text="Compare:").grid(row=3, column=0, sticky="w",
-                                              pady=2)
+        # Reference choices are consolidated in the final analysis editor.
         self.stats_compare = tk.StringVar()
         self.compare_picker = ttk.Combobox(
             frame, textvariable=self.stats_compare, state="readonly", width=16,
             values=tuple(COMPARE_LABELS.values()))
-        self.compare_picker.grid(row=3, column=1, sticky="ew", padx=(8, 0),
-                                 pady=2)
+        # Legacy variable kept for API compatibility; not a user-facing choice.
         self.compare_picker.bind("<<ComboboxSelected>>", self._compare_changed)
         self.references_button = ttk.Button(
             frame, text="Strains...", command=self._choose_references)
-        self.references_button.grid(row=3, column=2, sticky="e", padx=(6, 0),
-                                    pady=2)
+        # Reference selection is handled by analysis_button above.
 
         # A starting wrap, so the unwrapped text does not claim the whole
         # window before `_resize_run_text` has measured the pane.
@@ -512,12 +539,19 @@ class ExperimentApp:
         )
         self.stats_note.grid(row=4, column=0, columnspan=3, sticky="ew",
                              pady=(6, 0))
-        self.multi_step_button = ttk.Button(
-            frame, text="Additional multi-step analysis...", command=self._configure_multi_step)
-        self.multi_step_button.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 2))
-        self.multi_step_note = ttk.Label(frame, text="Off", wraplength=320, justify="left")
-        self.multi_step_note.grid(row=6, column=0, columnspan=3, sticky="ew")
         return frame
+
+    def _choose_final_analysis(self):
+        from . import analysis
+        from .gui.analysis import ask_analysis
+        panel = self.controller.panel_experiment
+        chosen = ask_analysis(self.root, panel.strains, panel.condition_codes(),
+                              analysis.for_experiment(panel, use_defaults=True),
+                              {c.code: c.exclude for c in panel.conditions},
+                              {c.code: c.display() for c in panel.conditions})
+        if chosen is not None:
+            self.controller.set_final_analysis(chosen)
+            self.refresh()
 
     def _configure_multi_step(self):
         from .gui.multistep import MultiStepDialog
@@ -559,11 +593,55 @@ class ExperimentApp:
         else:
             self.run_help.configure(wraplength=width)
             self.run_details.configure(wraplength=width)
-            self.data_review_note.configure(wraplength=max(140, width - 24))
             self.stats_note.configure(wraplength=max(140, width - 24))
-            self.multi_step_note.configure(wraplength=max(140, width - 24))
 
     # -- refresh -------------------------------------------------------------
+
+    def edit_layout(self) -> None:
+        from plate_template.presets import blank
+        from .gui.layout import LayoutEditor
+
+        if self._layout_editor is not None:
+            self._layout_editor.host.present()
+            return
+
+        def apply(template):
+            source = (str(editor.path.resolve()) if editor.path else
+                      self.controller.experiment.template_path
+                      if template.id == self.controller.experiment.template_id else "")
+            self.controller.use_layout(
+                template, source_path=source)
+            self.refresh()
+            self.status.say("Layout embedded in experiment; no template file needed")
+
+        editor = LayoutEditor(self.root, self.controller.template or blank(), apply)
+        self._layout_editor = editor
+        editor.host.on_dispose(lambda: setattr(self, "_layout_editor", None))
+
+    def save_layout_template(self) -> bool:
+        """Export a detached reusable copy; the experiment remains authoritative."""
+        from plate_template.app import default_template_dir
+        from plate_template.schema import from_dict, to_dict, save as save_template
+
+        template = self.controller.template
+        if template is None:
+            messagebox.showinfo("Save plate template", "Create a layout on Panel first.",
+                                parent=self.root)
+            return False
+        chosen = filedialog.asksaveasfilename(
+            title="Save reusable plate template (optional)",
+            initialdir=str(default_template_dir()), initialfile=f"{template.name}.json",
+            defaultextension=".json", filetypes=[("Plate template", "*.json")],
+            parent=self.root)
+        if not chosen:
+            return False
+        try:
+            save_template(from_dict(to_dict(template)), Path(chosen))
+        except OSError as exc:
+            messagebox.showerror("Save plate template", str(exc), parent=self.root)
+            return False
+        self.status.say(f"Saved reusable template {Path(chosen).name}; experiment keeps its own layout")
+        return True
 
     def refresh(self) -> None:
         e = self.controller.experiment
@@ -583,7 +661,7 @@ class ExperimentApp:
             (f"{len(e.strain_groups)} strain groups   {len(e.conditions)} condition(s)"
              if e.strain_groups else
              f"{filled} strain(s)   {len(e.conditions)} condition(s)   "
-             f"control slot {e.control_slot or '-'}"),
+             "references in final Analysis"),
             folder=e.photo_root,
             folder_note=self._folder_note(),
         )
@@ -614,7 +692,15 @@ class ExperimentApp:
 
         res = self.controller.resolution
         errors = [i for i in issues if i.severity is Severity.ERROR]
-        ready = bool(self.controller.files) and not errors
+        from . import analysis
+        final_errors = []
+        for panel in ([e.for_group(k) for k in e.strain_groups] if e.strain_groups else [e]):
+            try:
+                analysis.check_panel(analysis.for_experiment(panel), panel.strains,
+                                     panel.condition_codes(), {c.code: c.exclude for c in panel.conditions})
+            except ValueError as exc:
+                final_errors.append(str(exc))
+        ready = bool(self.controller.files) and not errors and not final_errors
 
         not_ready = (f"{len(errors)} error(s) found; Run lists them and asks "
                      f"before starting.")
@@ -642,11 +728,19 @@ class ExperimentApp:
         self.run_summary.configure(text=text)
         template = self.controller.template
         conditions = ", ".join(c.display() for c in e.conditions) or "none"
-        control = (f"slot {e.control_slot}: {e.strain(e.control_slot) or 'empty'}"
-                   if e.control_slot else "not selected")
+        def normalization_text(panel):
+            references = analysis.for_experiment(panel)["references"]
+            values = [(c.display(), panel.strain(panel.control_for(c.code))
+                       if panel.control_for(c.code) else "not selected")
+                      for c in panel.conditions]
+            if not any(c.code in references for c in panel.conditions):
+                names = list(dict.fromkeys(name for _, name in values))
+                return names[0] if len(names) == 1 else ("varies by treatment" if names else "not selected")
+            return "; ".join(f"{label}: {name}" for label, name in values) or "not selected"
+        control = normalization_text(e)
         self.run_details.configure(text=(
             f"Panel: {len(e.filled_slots())} of {e.slot_count()} slots filled\n"
-            f"Control: {control}\n"
+            f"Normalization: {control}\n"
             f"Conditions: {conditions}\n"
             f"Experiment top: {_PHOTO_TOP_LABELS[e.photo_top]}\n"
             f"Template: {template.name if template else 'none selected'}"
@@ -655,18 +749,20 @@ class ExperimentApp:
             panels = [e.for_group(k) for k in e.strain_groups]
             self.run_details.configure(text=(
                 "All strain groups will run separately:\n" + "\n".join(
-                    f"{p.set_key}: {len(p.filled_slots())} strains; control "
-                    f"{p.strain(p.control_slot) if p.control_slot else 'not selected'}"
+                    f"{p.set_key}: {len(p.filled_slots())} strains; normalization "
+                    f"{normalization_text(p)}"
                     for p in panels) +
                 f"\nConditions: {conditions}\nTemplate: {template.name if template else 'none selected'}"))
+        self.analysis_group.refresh()
         self._sync_statistics()
-        self._sync_data_review()
+        if final_errors:
+            self.run_summary.configure(text="Final analysis required: " + "; ".join(final_errors))
         running = (self._run_process is not None
                    and self._run_process.poll() is None)
         self.estimate_button.state(
             ["!disabled"] if ready and not running else ["disabled"])
         # Run stays available with errors: it lists them and asks first.
-        self.run_button.state(["disabled"] if running else ["!disabled"])
+        self.run_button.state(["disabled"] if running or final_errors else ["!disabled"])
 
     def _sync_data_review(self) -> None:
         flags = getattr(self, "_review_flags", None) or self._data_flags()
@@ -684,18 +780,16 @@ class ExperimentApp:
     def _sync_statistics(self) -> None:
         """Show the experiment's statistics in the Statistics box."""
         s = self.controller.experiment.statistics
-        multi = self.controller.experiment.multi_step
-        self.multi_step_note.configure(text=(
-            f"On: {'two-step' if multi.method == 'two_step' else 'full hierarchical'}, "
-            f"{'technical plates + time' if multi.scope == 'repeated' else 'technical plates'}; "
-            "separate comparison graphs" if multi.enabled else "Off: current analysis only"))
         self.stats_test.set(next(
             label for label, value in TEST_LABELS.items() if value == s.test))
         if s.test == "anova":
             # Dunnett only compares with a reference, so it is not offered
             # while every pair is being compared.
+            e = self.controller.experiment
+            all_pairs = s.all_pairs or any(p.final_analysis.get("all_pairs", False) for p in
+                ([e.for_group(k) for k in e.strain_groups] if e.strain_groups else [e]))
             labels = {k: v for k, v in POSTHOC_LABELS.items()
-                      if not (s.all_pairs and v == "dunnett")}
+                      if not (all_pairs and v == "dunnett")}
             current = s.posthoc
             self.correction_label.configure(text="Post-hoc:")
         else:
@@ -763,9 +857,7 @@ class ExperimentApp:
         else:
             follow = next(k for k, v in CORRECTION_LABELS.items()
                           if v == s.p_adjust)
-        compare = ("every pair" if s.all_pairs
-                   else "vs control" + (" + " + ", ".join(s.extra_references)
-                                        if s.extra_references else ""))
+        compare = "references selected in Analysis / comparisons"
         return f"{test}, {follow}, p < {s.alpha:g}, {compare}"
 
     def _test_changed(self, _event=None) -> None:
@@ -955,6 +1047,19 @@ class ExperimentApp:
         """
         import os
 
+        from . import analysis
+        if self.run_override is not None and self.run_override():
+            return
+        experiment = self.controller.experiment
+        try:
+            for panel in ([experiment.for_group(k) for k in experiment.strain_groups]
+                          if experiment.strain_groups else [experiment]):
+                analysis.check_panel(analysis.for_experiment(panel), panel.strains,
+                    panel.condition_codes(), {c.code: c.exclude for c in panel.conditions})
+        except ValueError as exc:
+            self.notebook.select(self.run_tab)
+            messagebox.showerror("Final analysis", str(exc), parent=self.root)
+            return
         findings = [issue for issue in self.controller.issues()
                     if issue.severity is not Severity.INFO]
         errors = [issue for issue in findings if issue.is_error]
@@ -1008,7 +1113,7 @@ class ExperimentApp:
                     "Cannot start quantification",
                     "No Python environment containing the scientific packages "
                     "was found. Start the designer with "
-                    "run_experiment_designer.bat, or install requirements.txt "
+                    "run_frogger.bat, or install requirements.txt "
                     "in the Python environment running this window.",
                     parent=self.root,
                 )
@@ -1192,12 +1297,21 @@ class ExperimentApp:
     def _dispose(self) -> None:
         """This tool is going away: stop watching the run. The run itself
         carries on -- it is a separate process, and its results still land."""
+        if self._layout_editor is not None:
+            self._layout_editor.root.destroy()
+            self._layout_editor = None
         if self._run_poll is not None:
             try:
                 self.notebook.after_cancel(self._run_poll)
             except tk.TclError:
                 pass
             self._run_poll = None
+
+    def rename_selected(self) -> None:
+        if self.notebook.select() == str(self.conditions):
+            self.conditions._rename()
+        else:
+            self.rename()
 
     def rename(self) -> None:
         name = simpledialog.askstring(
@@ -1225,6 +1339,7 @@ class ExperimentApp:
         dialog = BulkCreateDialog(
             self.root, out_dir,
             template_path=self.controller.experiment.template_path,
+            template=self.controller.template,
             conditions=self.controller.experiment.conditions,
         )
         if not dialog.created:
@@ -1267,6 +1382,7 @@ class ExperimentApp:
         self.controller.replace(experiment)
         self.path = path
         self.controller.load_template(path.parent if path else None)
+        self.controller.mark_saved(notify=False)
         self.controller.rescan()
         self.refresh()
         self.status.say(f"Opened {path.name}" if path else "New experiment")
@@ -1383,6 +1499,8 @@ class ExperimentApp:
     # -- closing -------------------------------------------------------------
 
     def _confirm_discard(self) -> bool:
+        if self._layout_editor is not None and not self._layout_editor.host.close():
+            return False
         if not self.controller.dirty:
             return True
         answer = messagebox.askyesnocancel(

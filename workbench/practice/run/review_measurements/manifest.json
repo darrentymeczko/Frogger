@@ -1,0 +1,72 @@
+{
+  "review": {
+    "version": 1,
+    "presentation": {
+      "version": 1,
+      "sheet": {
+        "view": "fit",
+        "rotate": false,
+        "brightness": 3.0,
+        "contrast": 1.0
+      },
+      "figure": {},
+      "montage": {
+        "crops": [],
+        "order": [],
+        "match_graph_order": false
+      },
+      "names": {
+        "result": "Practice run"
+      }
+    },
+    "extensions": {},
+    "capture_root": "{{PRACTICE_PHOTOS}}",
+    "measurement": {},
+    "final_analysis": {
+      "normalization": {
+        "*": 5
+      },
+      "references": {
+        "*": [
+          "WT"
+        ]
+      },
+      "matching": {
+        "tokens": [
+          "WT",
+          "EV"
+        ],
+        "case_sensitive": false
+      },
+      "all_pairs": false
+    },
+    "inclusion": {},
+    "statistics": {
+      "test": "t_test",
+      "p_adjust": "none",
+      "alpha": 0.05,
+      "posthoc": "dunnett",
+      "extra_references": [],
+      "all_pairs": false
+    },
+    "chosen": {
+      "GLU": {
+        "timepoint": "22 Hours",
+        "hours": 22.0,
+        "plate1": "_9.JPG",
+        "plate2": "_9.JPG",
+        "dilution": "level 1"
+      },
+      "GLY": {
+        "timepoint": "46 Hours",
+        "hours": 46.0,
+        "plate1": "_9.JPG",
+        "plate2": "_9.JPG",
+        "dilution": "level 1"
+      }
+    },
+    "edits": {}
+  },
+  "current": {},
+  "unlisted_files": "historical; rebuild before use"
+}

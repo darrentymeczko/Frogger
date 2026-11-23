@@ -24,12 +24,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-from .profiles import NamingProfile
+from .profiles import KeywordRule, NamingProfile
 
 # Version 2 adds strain groups; version 3 adds optional multi-step settings;
-# version 4 adds an optional photo order. Older designers must refuse newer
-# files rather than silently omit analyses.
-SCHEMA_VERSION = 4
+# version 4 adds an optional photo order; version 7 adds keyword rules; version
+# 8 adds treatment categories. Older designers must refuse newer files rather
+# than silently omit analyses.
+SCHEMA_VERSION = 8
 KIND = "spotting_experiment"
 
 #: Handpicked photos the user has already chosen, quantified once.
@@ -100,6 +101,7 @@ class Statistics:
                 "alpha": float(self.alpha),
                 "posthoc": self.posthoc if self.test == "anova" else "none",
                 "extra_references": tuple(self.extra_references),
+                "comparison_references": None,
                 "all_pairs": bool(self.all_pairs)}
 
     def review_dict(self) -> dict:
@@ -147,9 +149,16 @@ class Condition:
     #: QUANTIFY mode only: which dilution level to score. None means "not chosen
     #: yet", which validation reports rather than guessing.
     dilution: dict | None = None
+    #: Category name -> this treatment's value in it ("Carbon source" ->
+    #: "Glucose", "Temperature" -> "37°C"). Shared by every strain group; the
+    #: figures group, colour and compare treatments by these.
+    categories: dict[str, str] = field(default_factory=dict)
 
     def display(self) -> str:
         return self.label or self.code
+
+    def category(self, name: str) -> str:
+        return self.categories.get(name, "")
 
 
 @dataclass(frozen=True)
@@ -173,6 +182,7 @@ class StrainGroup:
 
     strains: list[str | None] = field(default_factory=list)
     control_slot: int | None = None
+    final_analysis: dict = field(default_factory=dict, kw_only=True)
     picks: dict[str, dict[str, str]] = field(default_factory=dict)
     conditions: dict[str, Condition] = field(default_factory=dict)
 
@@ -182,10 +192,11 @@ class Experiment:
     """One or more strain panels, their treatments and shared photo folder."""
 
     name: str = "Untitled"
-    #: The template this panel was spotted on. `template_id` is the authority --
-    #: `template_path` is a convenience that may go stale if files move.
+    #: Template identity/source are provenance. The embedded snapshot is the
+    #: authority; subsequent changes to a reusable template never change it.
     template_id: str = ""
     template_path: str = ""
+    template_snapshot: dict | None = field(default=None, kw_only=True)
     #: Index 0 is sample slot 1. None marks a slot that was deliberately left
     #: empty, which the existing configs already express as a null column.
     strains: list[str | None] = field(default_factory=list)
@@ -193,6 +204,9 @@ class Experiment:
     #: the mean of this slot's spots ON ITS OWN PLATE.
     control_slot: int | None = None
     conditions: list[Condition] = field(default_factory=list)
+    #: Named ways the treatments differ ("Carbon source", "Temperature"), in
+    #: the order the user listed them. Each condition gives its value in each.
+    categories: list[str] = field(default_factory=list)
     mode: str = TIMECOURSE
     #: Where the experiment/template's top edge appears in each photograph.
     photo_top: str = "top"
@@ -214,6 +228,11 @@ class Experiment:
     #: of plate -- and of strain group, when its slots name groups. A folder
     #: holding a different number of photos is left unassigned, never guessed.
     photo_order: tuple[OrderSlot, ...] = ()
+    #: `Photos whose name contains X are <facet> = Y`, stated by the user. They
+    #: beat the photo order and the profile, and lose only to per-photo
+    #: corrections, so the first thing a new user reaches for is also the thing
+    #: that wins.
+    keywords: tuple[KeywordRule, ...] = ()
     #: QUANTIFY only: condition code -> plate id -> relpath. The photograph the
     #: user picked for each plate of each condition, stated outright rather than
     #: derived from a filename.
@@ -225,6 +244,7 @@ class Experiment:
     ignored: list[str] = field(default_factory=list)
     #: The statistical tests the run's figures report.
     statistics: Statistics = field(default_factory=Statistics)
+    final_analysis: dict = field(default_factory=dict)
     multi_step: MultiStepAnalysis = field(default_factory=MultiStepAnalysis)
     #: FULL_OUTPUT draws every graph and chart; DATA_OUTPUT only writes the
     #: per-spot CSV (raw and normalised grey values).
@@ -246,9 +266,11 @@ class Experiment:
         group = self.strain_groups[key]
         return replace(self, name=f"{self.name} - {key}", set_key=key,
                        strains=group.strains, control_slot=group.control_slot,
+                       final_analysis=group.final_analysis,
                        picks=group.picks, strain_groups={},
                        conditions=[replace(group.conditions.get(c.code, c),
-                                           code=c.code, label=c.label)
+                                           code=c.code, label=c.label,
+                                           categories=dict(c.categories))
                                    for c in self.conditions])
 
     @property
@@ -262,6 +284,17 @@ class Experiment:
         if any(slot.group is not None for slot in self.photo_order):
             return ("plate", "set")
         return ("plate",)
+
+    def keyword_facets(self) -> tuple[str, ...]:
+        """What the keyword rules can assign, in FACETS order."""
+        have = {rule.facet for rule in self.keywords}
+        return tuple(f for f in ("set", "condition", "timepoint", "plate") if f in have)
+
+    def override_facets(self) -> tuple[str, ...]:
+        """What at least one hand correction supplies."""
+        have = {facet for entry in self.overrides.values() for facet in entry
+                if not facet.endswith("_label")}
+        return tuple(f for f in ("set", "condition", "timepoint", "plate") if f in have)
 
     def strain(self, slot: int) -> str | None:
         """The strain in a 1-based sample slot, or None if empty/out of range."""
@@ -298,17 +331,32 @@ class Experiment:
     def condition_codes(self) -> list[str]:
         return [c.code for c in self.conditions]
 
+    def category_values(self, name: str) -> list[str]:
+        """The values a category already has, in first-use order."""
+        return list(dict.fromkeys(c.categories[name] for c in self.conditions
+                                  if c.categories.get(name)))
+
     def control_for(self, code: str) -> int | None:
         """The control slot in force for one condition.
 
         The per-condition override is the whole reason this method exists; see
         the module docstring.
         """
+        if self.final_analysis:
+            from .analysis import normalization
+            return normalization(self.final_analysis, code)
         try:
             override = self.condition(code).control_slot
         except KeyError:
             return self.control_slot
         return override if override is not None else self.control_slot
+
+    def statistics_kwargs(self) -> dict:
+        from .analysis import statistics
+        result = {**self.statistics.plot_kwargs(), **statistics(self.final_analysis)}
+        if result["all_pairs"] and result["posthoc"] == "dunnett":
+            result["posthoc"] = "tukey"
+        return result
 
     def exclude_for(self, code: str) -> tuple[int, ...]:
         try:

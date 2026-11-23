@@ -32,6 +32,11 @@ if str(ROOT) not in sys.path:
 # work calls and no test pays for starting a process. The worker processes
 # themselves are tested in tests/uikit/test_uikit_tasks.py.
 os.environ.setdefault("SPOTTING_WORKERS", "thread")
+# Background-subtracted figure spots are cached on disk; tests keep theirs
+# out of the project's own cache.
+if "SPOTTING_FIGURE_SPOT_CACHE" not in os.environ:
+    import tempfile
+    os.environ["SPOTTING_FIGURE_SPOT_CACHE"] = tempfile.mkdtemp(prefix="spotting-figure-spots-")
 
 
 @pytest.fixture(scope="session")

@@ -148,7 +148,10 @@ def test_step_does_not_wrap(widget):
 def test_step_clamps_a_big_jump(widget):
     """Page Up/Down ask for ten; a short list must not refuse to move at all."""
     widget.tree.selection_set(widget.tree.get_children()[0])
-    assert not widget.step(10), "a jump past the end reports that it stopped"
+    assert widget.step(10)
+    assert widget.tree.selection()[0] == widget.tree.get_children()[-1]
+    assert not widget.step(10)
+    assert widget.step(-10)
     assert widget.tree.selection()[0] == widget.tree.get_children()[0]
 
 
@@ -191,3 +194,154 @@ def test_sort_keys_are_orderable(key):
     assert all(not (isinstance(v, float) and math.isnan(v)) for v in values), (
         f"{key} lets a NaN through; NaN compares false against everything and "
         f"scrambles the order")
+
+
+@pytest.fixture(params=["standalone", "workbench"])
+def keyboard_app(tk_root, tmp_path, monkeypatch, request):
+    from results_review import background, discovery, links
+    from results_review.app import ReviewApp
+
+    monkeypatch.setattr(background, "warm", lambda: None)
+    monkeypatch.setattr(ReviewApp, "_rebuild_current", lambda self: None)
+    monkeypatch.setattr(links, "LINKS_FILE", tmp_path / "links.json")
+    monkeypatch.setattr(links, "SEARCH_HINTS", [])
+    monkeypatch.setattr(discovery, "TIMECOURSE_RESULTS", tmp_path)
+    win = tk.Toplevel(tk_root)
+    run = discovery.SetRun(tmp_path, "Keyboard fixture", POOL)
+    shell = None
+    if request.param == "workbench":
+        from workbench.settings import Settings
+        from workbench.shell import Shell
+        shell = Shell(win, Settings(tmp_path / "workbench.json"), restore=False)
+        doc = shell._open("review", "Keyboard fixture", "", lambda host: ReviewApp(host, run))
+        assert doc is not None
+        app = doc.app
+        win.deiconify()
+    else:
+        app = ReviewApp(win, run)
+    win.update()
+    app.candidates.tree.focus_force()
+    win.update()
+    yield app
+    app.host.close()
+    if shell is not None:
+        shell.exit(force=True)
+
+
+def press(app, key):
+    app.focus_get().event_generate(f"<KeyPress-{key}>")
+    app.update()
+
+
+def test_real_key_event_moves_once_before_inherited_bindings(keyboard_app):
+    app = keyboard_app
+    kids = app.candidates.tree.get_children()
+    assert app.candidates.tree.selection() == (kids[0],)
+    app.candidates.tree.focus(kids[0])  # as after clicking a row
+    press(app, "Down")
+    assert app.candidates.tree.selection() == (kids[1],)
+    assert app.candidates.tree.focus() == kids[1]
+    assert app._preview.key == app.candidates._current().key
+    press(app, "Up")
+    assert app.candidates.tree.selection() == (kids[0],)
+    assert app._preview is None
+
+
+def test_repeat_keys_stop_at_boundaries_and_never_choose(keyboard_app):
+    app = keyboard_app
+    chosen = app.ctl.chosen().key
+    kids = app.candidates.tree.get_children()
+    for key, expected in [("Up", 0), ("Down", 1), ("Down", 2),
+                          ("Down", 2), ("Down", 2), ("Up", 1), ("Up", 0),
+                          ("Up", 0), ("Next", 2), ("Prior", 0)]:
+        press(app, key)
+        assert app.candidates.tree.selection() == (kids[expected],)
+        assert app.candidates.tree.focus() == kids[expected]
+        assert (app._preview or app.ctl.chosen()).key == app.candidates._current().key
+        assert app.ctl.chosen().key == chosen
+
+
+def test_refresh_and_sort_keep_preview_highlighted(keyboard_app):
+    app = keyboard_app
+    press(app, "Down")
+    preview = app._preview.key
+    app._refresh()
+    app.update()
+    assert app.candidates._current().key == preview
+    app.candidates.sort_by("cv")
+    app.update()
+    assert app.candidates._current().key == preview
+    assert app._preview.key == preview
+
+
+@pytest.mark.parametrize("control", ["entry", "text", "combo", "spin", "scale", "spots", "summary"])
+def test_editing_controls_keep_their_keys(keyboard_app, control):
+    from tkinter import ttk
+    app = keyboard_app
+    controls = {"entry": lambda: ttk.Entry(app),
+                "text": lambda: tk.Text(app),
+                "combo": lambda: ttk.Combobox(app, values=("A", "B")),
+                "spin": lambda: ttk.Spinbox(app, from_=0, to=10),
+                "scale": lambda: ttk.Scale(app),
+                "spots": lambda: app.table.tree,
+                "summary": lambda: app.table.summary}
+    w = controls[control]()
+    if control not in ("spots", "summary"):
+        w.grid(row=5, column=0)
+    else:
+        app.table.show([], [])  # unlinked-photo fixture otherwise hides tables
+    app.update()
+    w.focus_force()
+    app.update()
+    selection = app.candidates.tree.selection()
+    for key in ("Down", "Up", "Left", "Right", "Next", "Prior"):
+        w.focus_force()
+        app.update()
+        assert app.focus_get() is w
+        press(app, key)
+        assert app.candidates.tree.selection() == selection
+        if control == "combo":
+            w.tk.call("ttk::combobox::Unpost", str(w))
+    if control == "entry":
+        w.insert(0, "abc")
+        w.icursor(2)
+        press(app, "Left")
+        assert w.index("insert") == 1
+
+
+def test_canvas_click_and_tab_focus_support_navigation(keyboard_app):
+    app = keyboard_app
+    app.alpha_entry.focus_force()
+    app.sheet.canvas.event_generate("<ButtonPress-1>", x=20, y=20)
+    app.update()
+    assert app.focus_get() is app.sheet.canvas
+    press(app, "Down")
+    assert app.candidates.tree.selection() == (app.candidates.tree.get_children()[1],)
+    assert app.sheet.canvas.cget("takefocus") == "1"
+
+
+def test_image_and_actual_table_follow_selection_with_cached_frames(keyboard_app, monkeypatch):
+    from types import SimpleNamespace
+    import pandas as pd
+    from results_review import rebuild
+    app = keyboard_app
+    frames = {}
+    for i, c in enumerate(POOL):
+        row = dict(replicate="rep1", strain_col=1, strain=c.timepoint,
+                   raw_growth=float(i), relative_growth=float(i))
+        frames[c.key] = SimpleNamespace(tidy=pd.DataFrame([row]), messages=[])
+    monkeypatch.setattr(type(app.ctl), "can_edit", property(lambda self: True))
+    monkeypatch.setattr(app.ctl, "cached_frame", lambda cand=None: frames[(cand or app.ctl.chosen()).key])
+    monkeypatch.setattr(rebuild, "summarize", lambda *a, **kw: [])
+    monkeypatch.setattr(app, "_summarize_later", lambda *a: None)
+    images = []
+    monkeypatch.setattr(app, "_show_sheet", lambda c: images.append(c.key))
+    for key in ("Down", "Down", "Up", "Up", "Down"):
+        press(app, key)
+        current = app.candidates._current()
+        assert images[-1] == current.key
+        assert app.table._rows["rep1|1"]["strain"] == current.timepoint
+    # A late summary from a candidate already left cannot replace the table.
+    old = frames[POOL[2].key]
+    app._summary_landed((id(old), ()), old, [], None)
+    assert app.table._rows["rep1|1"]["strain"] == app.candidates._current().timepoint

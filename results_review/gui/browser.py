@@ -6,6 +6,10 @@ final figure uses, so what is on screen is the result, not an impression of it.
 
 The pane redraws on resize, and only then: scaling a 1500 px sheet on every
 mouse move makes the window feel broken. A short debounce is the difference.
+
+The spot picked in the table has the ROI it was measured through drawn on the
+montage, and clicking a spot picks its row: see `highlight` and
+`on_spot`. Both go through `results_review.spotmap`.
 """
 
 from __future__ import annotations
@@ -14,16 +18,24 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
 
-from .. import theme
+from .. import spotmap, theme
 from ..model import Candidate
 from .imaging import HAVE_PIL, ImageCache
 
 #: Milliseconds of quiet after a resize before the sheet is rescaled.
 REDRAW_DELAY = 120
 ADJUST_DELAY = 60
+#: Slider ranges for the plate's brightness and contrast, as factors. Faint
+#: media (K-OAc, glycerol) photograph dim enough that 2x was often not enough
+#: to judge a spot; past 5x the plate is mostly noise.
+BRIGHTNESS_RANGE = (0.25, 5.0)
+CONTRAST_RANGE = (0.25, 5.0)
 MIN_ZOOM = 1.0
 MAX_ZOOM = 5.0
 ZOOM_STEP = 1.25
+#: Pointer travel, in pixels, below which a press-and-release is a click on a
+#: spot rather than a pan.
+CLICK_SLOP = 4
 
 #: How a sheet can be shown (see `spotting_sheet.view`), in the order V steps
 #: through them. Fit is the default: the two panels and nothing else, side by
@@ -37,8 +49,17 @@ VIEWS = (("fit", "Fit"), ("aligned", "Aligned"))
 class SheetView(ttk.Frame):
     def __init__(self, master, on_redraw=None, on_toggle=None, *,
                  view: str = VIEWS[0][0], rotate: bool = False,
-                 on_view=None, **kw) -> None:
+                 on_view=None, on_spot=None, **kw) -> None:
         super().__init__(master, **kw)
+        #: Called with (sample slot, replicate number) when a spot is clicked.
+        self.on_spot = on_spot
+        #: (row, rows) of the table's selected spot, drawn over the montage.
+        self._highlight: "tuple[dict, list] | None" = None
+        #: Where the quantified spots are in the image on screen, and where
+        #: that image's top-left corner is on the canvas.
+        self._spots: list = []
+        self._origin = (0.0, 0.0)
+        self._press_at: "tuple[int, int] | None" = None
         self.rowconfigure(1, weight=1)
         self.columnconfigure(0, weight=1)
 
@@ -96,7 +117,8 @@ class SheetView(ttk.Frame):
                   font=theme.FONT_SMALL).grid(row=0, column=0,
                                               padx=(0, theme.GAP))
         self.brightness_scale = ttk.Scale(
-            self.display_controls, from_=0.25, to=2.0,
+            self.display_controls, from_=BRIGHTNESS_RANGE[0],
+            to=BRIGHTNESS_RANGE[1],
             variable=self._brightness_var, command=self._adjusted)
         self.brightness_scale.grid(row=0, column=1, sticky="ew")
         ttk.Label(self.display_controls, textvariable=self._brightness_text,
@@ -107,7 +129,8 @@ class SheetView(ttk.Frame):
                   font=theme.FONT_SMALL).grid(row=0, column=3,
                                               padx=(0, theme.GAP))
         self.contrast_scale = ttk.Scale(
-            self.display_controls, from_=0.25, to=3.0,
+            self.display_controls, from_=CONTRAST_RANGE[0],
+            to=CONTRAST_RANGE[1],
             variable=self._contrast_var, command=self._adjusted)
         self.contrast_scale.grid(row=0, column=4, sticky="ew")
         ttk.Label(self.display_controls, textvariable=self._contrast_text,
@@ -137,7 +160,8 @@ class SheetView(ttk.Frame):
         self.btn_reset_view.grid(row=0, column=4, padx=(theme.GAP, 0))
 
         self.canvas = tk.Canvas(self, background=theme.SUNKEN,
-                                highlightthickness=0, height=theme.SHEET_MIN_H)
+                                highlightthickness=0, height=theme.SHEET_MIN_H,
+                                takefocus=True)
         # Its right edge lines up with the right edge of the summary table
         # below.  The asymmetric inset belongs to both pieces of content; the
         # outer application pane contributes the remaining window margin.
@@ -145,6 +169,12 @@ class SheetView(ttk.Frame):
                          padx=(theme.PAD, 2 * theme.PAD), pady=(2, 0))
 
         self.cache = ImageCache()
+        self._load_id = None
+        self._request_id = 0
+        self._neighbors = ()
+        self._display_key = None
+        self._disposed = False
+        self.bind('<Destroy>', self._destroyed, add='+')
         self._path: "Path | None" = None
         self._cand: "Candidate | None" = None
         self._after: "str | None" = None
@@ -198,10 +228,8 @@ class SheetView(ttk.Frame):
     def show_updated(self, graph: "Path | None",
                      publication: bool = True) -> None:
         """A graph redrawn from the current corrections, in place of the sheet."""
-        if graph is not None:
-            # Each redraw is written to the same filename, so the scaled copy
-            # already in the cache is of the previous edit's graph.
-            self.cache.invalidate(graph)
+        # Source-stat keys detect actual rewrites. Restoring an unchanged
+        # redrawn graph after navigation must not throw away its fitted view.
         self._updated = graph
         self._updated_is_publication = publication
         self._showing_updated = graph is not None
@@ -258,7 +286,7 @@ class SheetView(ttk.Frame):
             self.caption.configure(text="", foreground=theme.MUTED)
             return
         c = self._cand
-        base = (f"{c.medium_label or c.medium} · {c.timepoint} · "
+        base = (f"{getattr(self, 'display_medium_label', '') or c.medium_label or c.medium} · {c.timepoint} · "
                 f"{c.dilution} dilution · {c.detail}")
         if self._showing_updated:
             how = ("redrawn from your corrections"
@@ -274,6 +302,27 @@ class SheetView(ttk.Frame):
 
     def clear(self) -> None:
         self.show(None, None)
+
+    def prefetch(self, paths) -> None:
+        """Only the closest two sheets; no retained candidate/run objects."""
+        self._neighbors = tuple(dict.fromkeys(paths))[:2]
+
+    def _destroyed(self, event):
+        if event.widget is self:
+            self.close()
+
+    def close(self):
+        if self._disposed:
+            return
+        self._disposed = True
+        self._request_id += 1
+        for timer in ('_load_id','_after','_adjust_after','_hide_after'):
+            value = getattr(self,timer,None)
+            if value is not None:
+                self.after_cancel(value)
+                setattr(self,timer,None)
+        self._image = None
+        self.cache.close()
 
     # -- drawing -------------------------------------------------------------
 
@@ -332,6 +381,24 @@ class SheetView(ttk.Frame):
         if self._adjust_after is not None:
             self.after_cancel(self._adjust_after)
         self._adjust_after = self.after(ADJUST_DELAY, self._draw)
+        if self._on_view is not None:
+            self._on_view(self.view, self.rotated)
+
+    def presentation(self) -> dict:
+        return {"view": self.view, "rotate": self.rotated,
+                "brightness": self._brightness_var.get(),
+                "contrast": self._contrast_var.get()}
+
+    def apply_presentation(self, settings: dict) -> None:
+        self._view.set(settings.get("view", "fit") if settings.get("view", "fit") in
+                       (v for v, _ in VIEWS) else "fit")
+        self._rotate.set(settings.get("rotate") is True)
+        self._brightness_var.set(float(settings.get("brightness", 1.0)))
+        self._contrast_var.set(float(settings.get("contrast", 1.0)))
+        self._brightness_text.set(f"{self._brightness_var.get():.0%}")
+        self._contrast_text.set(f"{self._contrast_var.get():.0%}")
+        self._reset_position()
+        self._draw()
 
     def _reset_position(self) -> None:
         self._zoom = MIN_ZOOM
@@ -346,6 +413,8 @@ class SheetView(ttk.Frame):
         self._contrast_text.set("100%")
         self._reset_position()
         self._draw()
+        if self._on_view is not None:
+            self._on_view(self.view, self.rotated)
 
     def _zoom_by(self, factor: float, event=None):
         old = self._zoom
@@ -372,6 +441,8 @@ class SheetView(ttk.Frame):
                              event)
 
     def _pan_start(self, event) -> None:
+        self.canvas.focus_set()
+        self._press_at = (event.x, event.y)
         if self._image is not None and self._zoom > MIN_ZOOM:
             self._drag_at = (event.x, event.y)
             self.canvas.configure(cursor="fleur")
@@ -385,9 +456,50 @@ class SheetView(ttk.Frame):
         self._drag_at = (event.x, event.y)
         self._draw()
 
-    def _pan_end(self, _event=None) -> None:
+    def _pan_end(self, event=None) -> None:
         self._drag_at = None
         self.canvas.configure(cursor="")
+        pressed, self._press_at = self._press_at, None
+        if (event is not None and pressed is not None
+                and abs(event.x - pressed[0]) <= CLICK_SLOP
+                and abs(event.y - pressed[1]) <= CLICK_SLOP):
+            self._clicked(event.x, event.y)
+
+    # -- the picked spot -----------------------------------------------------
+
+    def spot_under(self, x: float, y: float) -> "dict | None":
+        """The quantified spot at canvas point (x, y), if there is one."""
+        if self._image is None or self._showing_updated:
+            return None
+        return spotmap.spot_at(self._spots, x - self._origin[0],
+                               y - self._origin[1])
+
+    def _clicked(self, x: float, y: float) -> None:
+        spot = self.spot_under(x, y)
+        if spot is not None and self.on_spot is not None:
+            self.on_spot(int(spot["slot"]), int(spot["rep"]))
+
+    def highlight(self, row: "dict | None", rows: "list | None" = None) -> None:
+        """Draw the ROI `row` was read through on its spot in the montage.
+
+        `rows` are the other spots of the same candidate: their positions are
+        what carries the photo's ROI onto the montage (see `spotmap`).
+        """
+        self._highlight = (row, list(rows or ())) if row is not None else None
+        self._draw_highlight()
+
+    def _draw_highlight(self) -> None:
+        self.canvas.delete("spot")
+        if self._highlight is None or self._image is None or self._showing_updated:
+            return
+        row, rows = self._highlight
+        shape = spotmap.outline(row, rows, self._spots)
+        if shape is None or len(shape["roi"]) < 3:
+            return
+        ox, oy = self._origin
+        points = shape["roi"] + shape["roi"][:1]
+        self.canvas.create_line(*[v for x, y in points for v in (ox + x, oy + y)],
+                                fill=theme.ROI_INTERIOR, width=2, tags="spot")
 
     def _resized(self, _event=None) -> None:
         if self._after is not None:
@@ -404,10 +516,20 @@ class SheetView(ttk.Frame):
                                 justify="center")
 
     def _draw(self) -> None:
+        if self._disposed:
+            return
+        for timer in ('_load_id','_after','_adjust_after'):
+            value = getattr(self,timer,None)
+            if value is not None:
+                self.after_cancel(value)
+                setattr(self,timer,None)
+        self._request_id += 1
+        request = self._request_id
         self._after = None
         self._adjust_after = None
         self.canvas.delete("all")
         self._image = None
+        self._display_key = None
         if self._cand is None:
             return self._message("Choose a candidate to see its sheet.")
 
@@ -425,25 +547,81 @@ class SheetView(ttk.Frame):
         canvas_w = max(self.canvas.winfo_width() - 2, 64)
         canvas_h = max(self.canvas.winfo_height() - 2, 64)
         box = (int(canvas_w * self._zoom), int(canvas_h * self._zoom))
-        img = self.cache.get(path, box, self._brightness_var.get(),
-                             self._contrast_var.get(), mode=self.view,
-                             rotate=self.rotated)
-        if img is None:
-            if self.cache.last_error:
-                return self._message(
-                    f"{dict(VIEWS)[self.view]}{' (rotated)' if self.rotated else ''} "
-                    f"view isn't available for this "
-                    f"sheet: {self.cache.last_error}.\n\nPress V for another "
-                    f"view.", theme.WARNING)
-            return self._message(f"Could not read {Path(path).name}.",
-                                 theme.ERROR)
+        if not HAVE_PIL:
+            img = self.cache.get(path,box,self._brightness_var.get(),
+                                 self._contrast_var.get(),self.view,self.rotated)
+            if img is not None:
+                self._paint(img,canvas_w,canvas_h)
+            else:
+                self._message(self.cache.last_error or f'Could not read {Path(path).name}.',theme.WARNING)
+            return
+        try:
+            key = self.cache.key(path,box,self._brightness_var.get(),
+                                 self._contrast_var.get(),self.view,self.rotated)
+            img = self.cache.photo(key)
+            if img is not None:
+                self._display_key = key
+                self._paint(img,canvas_w,canvas_h)
+                self._prefetch(box)
+                return
+            self._message(f'Loading {Path(path).name}…')
+            future = self.cache.request(key)
+            self._poll_image(request,key,future,canvas_w,canvas_h)
+        except Exception as exc:
+            self._message(f'Could not load {Path(path).name}: {exc}',theme.ERROR)
+
+    def _poll_image(self, request, key, future, canvas_w, canvas_h):
+        self._load_id = None
+        if self._disposed or request != self._request_id:
+            return
+        if not self.cache.current(key):
+            self._draw()
+            return
+        try:
+            if future is None:
+                future = self.cache.request(key)
+            if future is None or not future.done():
+                self._load_id = self.after(16,lambda:self._poll_image(
+                    request,key,future,canvas_w,canvas_h))
+                return
+            prepared = future.result()
+            # Recheck immediately before publishing: disk or settings may have
+            # changed while the worker was decoding/resizing.
+            if not self.cache.current(key):
+                return self._draw()
+            img = self.cache.photo(key,prepared)
+            self._display_key = key
+            self._paint(img,canvas_w,canvas_h)
+            self._prefetch(key[2:4])
+        except Exception as exc:
+            self._message(f'Could not load {Path(key[0]).name}: {exc}',theme.ERROR)
+
+    def _prefetch(self, box):
+        # Foreground is already displayed. Speculation never queues behind a
+        # full pool and is limited to two immediate neighbors in visible order.
+        for path in self._neighbors:
+            try:
+                key = self.cache.key(path,box,self._brightness_var.get(),
+                                     self._contrast_var.get(),self.view,self.rotated)
+                if self.cache.photo(key) is None:
+                    self.cache.request(key)
+            except (OSError,RuntimeError):
+                pass
+
+    def _paint(self, img, canvas_w, canvas_h):
+        self.canvas.delete('all')
         self._image = img
         max_x = max((img.width() - canvas_w) / 2, 0)
         max_y = max((img.height() - canvas_h) / 2, 0)
         self._pan_x = min(max_x, max(-max_x, self._pan_x))
         self._pan_y = min(max_y, max(-max_y, self._pan_y))
-        self.canvas.create_image(canvas_w // 2 + 1 + self._pan_x,
-                                 canvas_h // 2 + 1 + self._pan_y, image=img)
+        cx = canvas_w // 2 + 1 + self._pan_x
+        cy = canvas_h // 2 + 1 + self._pan_y
+        self.canvas.create_image(cx, cy, image=img)
+        self._origin = (cx - img.width() // 2, cy - img.height() // 2)
+        self._spots = ([] if self._showing_updated
+                       else self.cache.spots(self._display_key))
+        self._draw_highlight()
         if self._showing_updated:
             # No overlay caption here: the graph carries its own footnote and
             # the line above the canvas already says whose numbers these are.

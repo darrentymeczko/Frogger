@@ -624,7 +624,10 @@ class DataReviewApp(ttk.Frame):
                 lines.append("Same strain and dilution here: " + ", ".join(others))
             lines.append(f"Row {r + 1}, column {c + 1} of the photograph")
         if (r, c) in found.rim:
-            lines.append("The engine flags this ROI as touching the rim or a label.")
+            lines.append("The engine flags this ROI as unsuitable (interior, rim or label).")
+        if found.quality.get((r, c)):
+            lines.append("ROI quality: " + str(found.quality[(r, c)]).replace("_", " "))
+        lines.append("Measurement method: " + found.method)
         if found.approximate:
             lines.append("(Values from another dilution's ROI: this photo was "
                          "measured for a different design.)")

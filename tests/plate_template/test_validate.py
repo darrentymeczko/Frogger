@@ -109,16 +109,18 @@ def test_dil_out_of_range():
 def test_no_control_designated():
     t = clean()
     t.plate("1").control_slot = None
-    assert one(t, "no_control_designated").severity is Severity.ERROR
+    assert "no_control_designated" not in codes(t)
+    assert not blocking(validate(t)), "Plate design can finish without normalization"
 
 
 def test_no_control_on_plate():
-    """The hard rule: normalisation is within-plate, so each plate needs one."""
+    """Dormant legacy hints cannot block plate design without a control UI."""
     t = clean()
     t.plate("1").control_slot = 9
     issue = one(t, "no_control_on_plate")
-    assert issue.severity is Severity.ERROR
+    assert issue.severity is Severity.INFO
     assert issue.plate_id == "1"
+    assert not blocking(validate(t))
 
 
 def test_duplicate_placement_reports_both_cells():
@@ -142,7 +144,7 @@ def test_duplicate_across_plates_is_also_caught():
 
 def test_blocking_filters_to_errors():
     t = clean()
-    t.plate("1").control_slot = None
+    t.plate("1").set(0, 0, Cell.spot(1, 1, 7))
     issues = validate(t)
     assert all(i.severity is Severity.ERROR for i in blocking(issues))
     assert blocking(issues)
@@ -181,8 +183,8 @@ def test_control_missing_dilution():
     t = clean()
     t.plate("1").set(1, 0, EMPTY)  # control slot 1 loses dilution 1
     issue = one(t, "control_missing_dilution")
-    assert issue.severity is Severity.WARNING
-    assert "cannot be scored" in issue.message
+    assert issue.severity is Severity.INFO
+    assert "final experiment Analysis" in issue.message
 
 
 def test_control_differs_between_plates():
@@ -193,7 +195,7 @@ def test_control_differs_between_plates():
             p2.set(r, c, EMPTY)
     p2.set(0, 0, Cell.spot(2, 2, 0))
     p2.set(1, 0, Cell.spot(2, 2, 1))
-    assert one(t, "control_differs_between_plates").severity is Severity.WARNING
+    assert one(t, "control_differs_between_plates").severity is Severity.INFO
 
 
 def test_replicate_split_across_plates():

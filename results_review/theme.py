@@ -110,6 +110,11 @@ REVIEWED_BAD_SOFT = "#fdecea"
 
 CONTROL_SOFT = "#eaf1fb"
 
+# The ROI of the spot picked in the table, drawn over the montage: cyan, as in
+# the measurement's own overlay (spotting_quant), and unlike the grey plate or
+# the amber "quantified" outline.
+ROI_INTERIOR = "#22d3ee"
+
 ERROR = tokens.ERROR
 WARNING = tokens.WARNING
 OK = tokens.OK
@@ -176,6 +181,9 @@ def flag_text(row) -> str:
         parts.append("control")
     if bool(row.get("artifact")):
         parts.append("artifact")
+    quality = row.get("roi_quality")
+    if isinstance(quality, str) and quality:
+        parts.append(quality.replace("_", " "))
     if bool(row.get("excluded")):
         src = row.get("excluded_source") or ""
         parts.append("excluded" if src == "config" else "excluded (you)")
@@ -188,8 +196,16 @@ def flag_text(row) -> str:
         parts.append("outlier cleared (you)")
     if bool(row.get("manual")):
         parts.append("re-measured")
-    if not bool(row.get("control_ok", True)):
-        parts.append("control too dim")
+    reason = row.get("normalization_reason")
+    if isinstance(reason, str) and reason:
+        parts.append("derived unavailable: " + reason.replace("_", " "))
+    elif not bool(row.get("control_ok", True)):
+        parts.append("normalization unavailable")
+    if row.get("growth_quality") == "low_growth":
+        parts.append("low growth (raw retained)")
+    error = row.get("measurement_error")
+    if isinstance(error, str) and error:
+        parts.append(error)
     if row.get("data_review"):
         parts.append(f"⚑ data review: {row['data_review']}")
     return ", ".join(parts)

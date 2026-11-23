@@ -844,6 +844,7 @@ def build_montage(combo: str, plates: list[sb.PlateData], strains: list[str | No
             for sy0, sy1, dy0 in yp:
                 ax.imshow(blk[sy0:sy1, sx0:sx1], cmap="gray", vmin=vmin,
                           vmax=vmax, interpolation="bilinear", aspect="equal",
+                          origin="upper",
                           extent=(dx0, dx0 + sx1 - sx0, dy0 + sy1 - sy0, dy0))
         ax.set_xlim(0, W)
         ax.set_ylim(heights_px[k], 0)

@@ -97,6 +97,9 @@ def design_errors(e, template=None, resolution=None, flagged_plates=None):
         return errors
     excluded = exclusions(e, flagged_plates)
     rows = [r for r in selected_rows(e, resolution) if r.relpath not in excluded]
+    for hour in s.hours:
+        if not any(r.timepoint == hour for r in rows):
+            errors.append(f"{hour:g} h: no included photo at this selected hour.")
     missing = [r.relpath for r in rows if not s.plate_ids.get(r.relpath)]
     if missing:
         errors.append(f"Assign technical plate labels to {len(missing)} selected photo(s); labels must follow the same physical plate across hours.")

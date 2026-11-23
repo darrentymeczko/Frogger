@@ -131,6 +131,10 @@ class RunInfo:
     #: run was made (`data_review.flags.DataFlags.to_dict`). Either may be empty.
     data_review_file: str = ""
     data_review_snapshot: dict = field(default_factory=dict)
+    #: The experiment's treatment categories ("Carbon source", "Temperature"),
+    #: in its order, and each medium code's value in them.
+    categories: list = field(default_factory=list)
+    condition_categories: dict = field(default_factory=dict)
 
     @property
     def level_names(self) -> list:
@@ -170,11 +174,17 @@ def load_run_info(results_dir: Path) -> "RunInfo | None":
             controls[str(medium)] = slot
 
     experiment = raw.get("experiment") or {}
+    if not isinstance(experiment, dict):
+        experiment = {}
     cfg = raw.get("pipeline_config")
     layout = raw.get("dilution_layout")
     review = raw.get("data_review") if isinstance(raw.get("data_review"), dict) else {}
     snapshot = review.get("flags")
+    categories, condition_categories = _categories(
+        _live_experiment(review.get("file"), experiment) or experiment)
     return RunInfo(
+        categories=categories,
+        condition_categories=condition_categories,
         data_review_file=str(review.get("file") or ""),
         data_review_snapshot=snapshot if isinstance(snapshot, dict) else {},
         dilution_layout=layout if isinstance(layout, dict) else {},
@@ -188,6 +198,39 @@ def load_run_info(results_dir: Path) -> "RunInfo | None":
     )
 
 
+def _live_experiment(review_file, snapshot: dict) -> "dict | None":
+    """The experiment file as it is now, when the run said where it is.
+
+    Categories are display, like the data review's flags: set after a run,
+    they should still reach its figures. The file sits beside the data review
+    and must be the same experiment (same id) as the one that ran.
+    """
+    if not review_file or not snapshot.get("id"):
+        return None
+    try:
+        from data_review import flags as flagfile
+        path = flagfile.experiment_for(Path(str(review_file)))
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, ImportError):
+        return None
+    if not isinstance(raw, dict) or raw.get("id") != snapshot.get("id"):
+        return None
+    return raw
+
+
+def _categories(experiment: dict) -> "tuple[list, dict]":
+    names = [str(n) for n in experiment.get("categories") or [] if isinstance(n, str) and n.strip()]
+    values = {}
+    for condition in experiment.get("conditions") or []:
+        if not isinstance(condition, dict) or not isinstance(condition.get("categories"), dict):
+            continue
+        own = {str(k): str(v) for k, v in condition["categories"].items()
+               if k in names and isinstance(v, str) and v.strip()}
+        if own:
+            values[str(condition.get("code"))] = own
+    return names, values
+
+
 @dataclass
 class SetRun:
     """One `Results/Timecourse/<set>/` folder, as far as the browser cares."""
@@ -197,6 +240,7 @@ class SetRun:
     candidates: list[Candidate] = field(default_factory=list)
     #: Present only for a folder produced through the experiment layer.
     experiment: "RunInfo | None" = None
+    manifest: dict = field(default_factory=dict)
 
     # -- layout --------------------------------------------------------------
 
@@ -236,6 +280,17 @@ class SetRun:
         """
         return next((c.medium_label for c in self.candidates
                      if c.medium == medium and c.medium_label), medium)
+
+    @property
+    def categories(self) -> list:
+        """The experiment's treatment category names (none for a console run)."""
+        return list(self.experiment.categories) if self.experiment else []
+
+    def medium_categories(self, medium: str) -> dict:
+        """``{category: value}`` for one medium code."""
+        if self.experiment is None:
+            return {}
+        return dict(self.experiment.condition_categories.get(medium, {}))
 
     def for_medium(self, medium: str) -> list[Candidate]:
         """This medium's candidates, in the CSV's own (rank_score) order."""
@@ -297,8 +352,12 @@ def load_set(results_dir: Path) -> SetRun:
             f"{TIMECOURSE_RESULTS / 'Set01'}.")
     run.candidates = load_candidates(run.candidates_csv)
     run.experiment = load_run_info(results_dir)
+    from .runs import read
+    run.manifest = read(results_dir)
     if run.experiment and run.experiment.name:
         run.label = run.experiment.name
+    if run.manifest:
+        run.label = f"{run.manifest.get('name', results_dir.name)} [{run.manifest['id'][:8]}]"
     names = run.experiment.level_names if run.experiment is not None else []
     if names:
         # The recorded order is the only source of it: a design's own level

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 from .model import (
@@ -33,8 +34,10 @@ from .model import (
     Statistics,
     StrainGroup,
 )
-from .profiles import ProfileError, profile_from_dict, profile_to_dict
-from . import multistep
+from .profiles import (
+    ProfileError, keyword_from_dict, keyword_to_dict, profile_from_dict, profile_to_dict,
+)
+from . import multistep, analysis
 
 
 class ExperimentError(ValueError):
@@ -72,6 +75,8 @@ def condition_to_dict(c: Condition) -> dict:
         d["exclude"] = list(c.exclude)
     if c.dilution:
         d["dilution"] = dict(c.dilution)
+    if c.categories:
+        d["categories"] = dict(c.categories)
     return d
 
 
@@ -99,9 +104,17 @@ def condition_from_dict(raw: dict, path: str) -> Condition:
                 f"got {type(slot).__name__}"
             )
 
+    categories = _get(raw, "categories", path, dict, default={})
+    for name, value in categories.items():
+        if not isinstance(value, str):
+            raise ExperimentError(
+                f"{path}.categories[{name!r}]: expected text, got {type(value).__name__}"
+            )
+
     return Condition(
         code=code,
         label=_get(raw, "label", path, str, default=""),
+        categories={str(k): v.strip() for k, v in categories.items() if v.strip()},
         control_slot=_get(raw, "control_slot", path, int, default=None),
         exclude=tuple(exclude),
         dilution=dilution,
@@ -149,6 +162,16 @@ def statistics_from_dict(raw: dict, path: str) -> Statistics:
     )
 
 
+def keywords_from_list(raw: list, path: str) -> tuple:
+    rules = []
+    for i, item in enumerate(raw):
+        try:
+            rules.append(keyword_from_dict(item, f"{path}[{i}]"))
+        except ProfileError as exc:
+            raise ExperimentError(str(exc)) from exc
+    return tuple(rules)
+
+
 def order_to_list(order) -> list[dict]:
     return [{"plate": s.plate, **({"group": s.group} if s.group is not None else {})}
             for s in order]
@@ -170,7 +193,7 @@ def order_from_list(raw: list, path: str) -> tuple[OrderSlot, ...]:
 
 def to_dict(e: Experiment) -> dict:
     d: dict = {
-        "schema_version": max(e.schema_version, SCHEMA_VERSION) if (e.strain_groups or e.multi_step.enabled or e.photo_order) else e.schema_version,
+        "schema_version": max(e.schema_version, SCHEMA_VERSION) if (e.strain_groups or e.multi_step.enabled or e.photo_order or e.keywords or e.categories) else e.schema_version,
         "kind": KIND,
         "id": e.id,
         "revision": e.revision,
@@ -182,9 +205,18 @@ def to_dict(e: Experiment) -> dict:
         d["created"] = e.created
 
     d["template"] = {"id": e.template_id, "path": e.template_path}
+    if e.template_snapshot is not None:
+        from copy import deepcopy
+        d["template"]["snapshot"] = deepcopy(e.template_snapshot)
+        d["schema_version"] = SCHEMA_VERSION
     d["mode"] = e.mode
     d["strains"] = list(e.strains)
     d["control_slot"] = e.control_slot
+    if e.final_analysis:
+        d["final_analysis"] = analysis.validate(e.final_analysis)
+        d["schema_version"] = SCHEMA_VERSION
+    if e.categories:
+        d["categories"] = list(e.categories)
     d["conditions"] = [condition_to_dict(c) for c in e.conditions]
     d["statistics"] = statistics_to_dict(e.statistics)
     d["multi_step"] = multistep.to_dict(e.multi_step)
@@ -192,8 +224,11 @@ def to_dict(e: Experiment) -> dict:
     if e.strain_groups:
         d["strain_groups"] = {
             key: {"strains": list(g.strains), "control_slot": g.control_slot,
+                  "final_analysis": analysis.validate(g.final_analysis) if g.final_analysis else {},
                   "picks": {c: dict(p) for c, p in g.picks.items()},
-                  "conditions": [condition_to_dict(c) for c in g.conditions.values()]}
+                  # Categories are shared; a group's copy never overrides them.
+                  "conditions": [condition_to_dict(replace(c, categories={}))
+                                 for c in g.conditions.values()]}
             for key, g in e.strain_groups.items()
         }
 
@@ -206,6 +241,8 @@ def to_dict(e: Experiment) -> dict:
         photos["set_key"] = e.set_key
     if e.photo_order:
         photos["order"] = order_to_list(e.photo_order)
+    if e.keywords:
+        photos["keywords"] = [keyword_to_dict(k) for k in e.keywords]
     if e.picks:
         photos["picks"] = {
             code: dict(sorted(slots.items()))
@@ -251,6 +288,14 @@ def from_dict(d: dict) -> Experiment:
         )
 
     template = _get(d, "template", "$", dict, default={})
+    snapshot = _get(template, "snapshot", "$.template", dict, default=None)
+    if snapshot is not None:
+        from plate_template.schema import TemplateError, from_dict as layout_from_dict
+        from plate_template.schema import to_dict as layout_to_dict
+        try:
+            snapshot = layout_to_dict(layout_from_dict(snapshot))
+        except TemplateError as exc:
+            raise ExperimentError(f"$.template.snapshot: {exc}") from exc
     strains_raw = _get(d, "strains", "$", list, default=[])
     strains: list[str | None] = []
     for i, s in enumerate(strains_raw):
@@ -267,6 +312,17 @@ def from_dict(d: dict) -> Experiment:
         condition_from_dict(raw, f"$.conditions[{i}]")
         for i, raw in enumerate(_get(d, "conditions", "$", list, default=[]))
     ]
+    categories = _get(d, "categories", "$", list, default=[])
+    for i, name in enumerate(categories):
+        if not isinstance(name, str) or not name.strip():
+            raise ExperimentError(f"$.categories[{i}]: expected a category name")
+    categories = list(dict.fromkeys(n.strip() for n in categories))
+    for i, c in enumerate(conditions):
+        unknown = set(c.categories) - set(categories)
+        if unknown:
+            raise ExperimentError(
+                f"$.conditions[{i}].categories: {sorted(unknown)[0]!r} is not one of "
+                f"the experiment's categories")
     seen: set[str] = set()
     for c in conditions:
         if c.code in seen:
@@ -327,28 +383,42 @@ def from_dict(d: dict) -> Experiment:
             raise ExperimentError(f"{path}: expected an object")
         # Reuse the same strict panel/pick/condition validation as a legacy file.
         try:
-            panel = from_dict({"schema_version": SCHEMA_VERSION, "mode": mode,
+            panel = from_dict({"schema_version": d["schema_version"], "mode": mode,
                                "strains": raw.get("strains", []),
                                "control_slot": raw.get("control_slot"),
+                               "final_analysis": raw.get("final_analysis", {}),
+                               "statistics": d.get("statistics", {}),
                                "conditions": raw.get("conditions", []),
                                "photos": {"picks": raw.get("picks", {})}})
         except ExperimentError as exc:
             raise ExperimentError(f"{path}: {exc}") from exc
         groups[key] = StrainGroup(panel.strains, panel.control_slot, panel.picks,
-                                 {c.code: c for c in panel.conditions})
+                                 {c.code: c for c in panel.conditions},
+                                 final_analysis=panel.final_analysis)
+        if d["schema_version"] < 5 and not raw.get("final_analysis"):
+            # An absent group condition inherited the entire shared condition;
+            # an explicit group condition replaced it (including a null control).
+            # Preserve that distinction while migrating only scientific choices.
+            effective = [groups[key].conditions.get(c.code, c) for c in conditions]
+            groups[key].final_analysis = analysis.from_legacy(
+                panel.strains, panel.control_slot,
+                {c.code: c.control_slot for c in effective if c.control_slot is not None},
+                panel.statistics.extra_references, panel.statistics.all_pairs)
 
     try:
         multi_step = multistep.from_dict(d.get("multi_step", {}))
     except (ValueError, TypeError) as exc:
         raise ExperimentError(f"$.multi_step: {exc}") from exc
 
-    return Experiment(
+    experiment = Experiment(
         name=_get(d, "name", "$", str, default="Untitled"),
         template_id=_get(template, "id", "$.template", str, default=""),
         template_path=_get(template, "path", "$.template", str, default=""),
+        template_snapshot=snapshot,
         strains=strains,
         control_slot=_get(d, "control_slot", "$", int, default=None),
         conditions=conditions,
+        categories=categories,
         mode=mode,
         photo_top=photo_top,
         photo_root=_get(photos, "root", "$.photos", str, default=""),
@@ -357,6 +427,8 @@ def from_dict(d: dict) -> Experiment:
         profile=profile,
         photo_order=order_from_list(
             _get(photos, "order", "$.photos", list, default=[]), "$.photos.order"),
+        keywords=keywords_from_list(
+            _get(photos, "keywords", "$.photos", list, default=[]), "$.photos.keywords"),
         picks=picks,
         overrides=overrides,
         ignored=[str(p) for p in _get(photos, "ignored", "$.photos", list, default=[])],
@@ -371,6 +443,14 @@ def from_dict(d: dict) -> Experiment:
         created=_get(d, "created", "$", str, default=""),
         schema_version=SCHEMA_VERSION,
     )
+
+    try:
+        experiment.final_analysis = (analysis.validate(d["final_analysis"])
+            if d.get("final_analysis") else
+            analysis.for_experiment(experiment) if d["schema_version"] < 5 else {})
+    except ValueError as exc:
+        raise ExperimentError(f"$.final_analysis: {exc}") from exc
+    return experiment
 
 
 # ---------------------------------------------------------------------------
@@ -398,13 +478,16 @@ def load(path: Path) -> Experiment:
     except OSError as exc:
         raise ExperimentError(f"could not read {path}: {exc}") from exc
     try:
-        return loads_experiment(text)
+        experiment = loads_experiment(text)
+        _pin_legacy_layout(experiment, Path(path).parent)
+        return experiment
     except ExperimentError as exc:
         raise ExperimentError(f"{path}: {exc}") from exc
 
 
 def save(e: Experiment, path: Path, *, bump_revision: bool = True) -> None:
     """Write atomically -- these files live on OneDrive."""
+    _pin_legacy_layout(e, Path(path).parent)
     if bump_revision:
         e.revision += 1
     path = Path(path)
@@ -412,3 +495,16 @@ def save(e: Experiment, path: Path, *, bump_revision: bool = True) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(dumps_experiment(e), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _pin_legacy_layout(e: Experiment, base: Path) -> None:
+    from plate_template.schema import TemplateError
+    from .layout import pin
+    # Incomplete/old experiments remain editable and saveable when their old
+    # source is missing. The controller reports that problem. Never substitute
+    # an external file for an already embedded snapshot.
+    if e.template_snapshot is None:
+        try:
+            pin(e, base)
+        except TemplateError:
+            pass

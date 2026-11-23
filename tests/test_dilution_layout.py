@@ -221,14 +221,16 @@ def test_every_level_of_a_six_level_design_is_scored(fake_cache):
     assert asked == {(p, (d + 1, d + 7)) for p in (1, 2) for d in range(6)}
 
 
-def test_fewer_than_three_replicates_cannot_be_scored(fake_cache):
+def test_fewer_than_three_replicates_stay_reviewable_without_cv(fake_cache):
     """A floor of the statistics, not of the layout: n < 3 has no CV or t-test.
 
     Six levels spotted ONCE per plate leave two replicates across the pairing.
     """
     layout = uniform_layout(6, 1)
-    assert tc.score_candidate(candidate(), layout.levels[0], Path("c"),
-                              STRAINS, 1, layout=layout) is None
+    result = tc.score_candidate(candidate(), layout.levels[0], Path("c"),
+                                STRAINS, 1, layout=layout)
+    assert np.isnan(result["median_CV"])
+    assert "cv_unavailable" in result["quality_flags"]
 
 
 def test_scoring_reads_the_levels_own_rows(fake_cache):
@@ -543,3 +545,42 @@ def test_a_cache_miss_adds_to_the_file_instead_of_replacing_it(tmp_path, monkeyp
     # The first pass's choices must still be served without measuring again.
     sb.measure(ref, replace(opts, quant_rows=(1,)), tmp_path, row_sets=[(1,)])
     assert measured == [[(1,), (2,)], [(3,)]]
+
+
+# ---------------------------------------------------------------------------
+# A level the template declares but never spots
+# ---------------------------------------------------------------------------
+
+
+def _declared_but_unspotted():
+    """Two levels spotted on plate 1, a third declared with no spots at all --
+    what the Plate Designer saves for a two-dilution design left on its
+    default of three levels."""
+    spotted = [sb.DilutionLevel(i, f"level {i + 1}",
+                                ((1, (sb.LevelCell(i, 0, 1, 1),)),))
+               for i in range(2)]
+    return sb.DilutionLayout((*spotted, sb.DilutionLevel(2, "level 3", ())), 6, 8)
+
+
+def test_on_plate_reads_whether_a_level_is_spotted_there():
+    layout = _declared_but_unspotted()
+    assert layout.levels[0].on_plate(1)
+    assert not layout.levels[0].on_plate(2)
+    assert not layout.levels[2].on_plate(1)
+
+
+def test_candidate_plates_skips_a_level_absent_from_a_plate(monkeypatch):
+    # Used to raise KeyError from inside its own error handler, crashing the run.
+    calls = []
+    monkeypatch.setattr(tc, "_cached_measure",
+                        lambda *a, **k: calls.append(a) or "measured")
+    layout = _declared_but_unspotted()
+    shot = tc.Shot(Path("p1.jpg"), 20.0, "20 Hours", "GLU", "Glucose", 1)
+    cand = {"plate1": shot}
+    assert tc.candidate_plates(cand, layout.levels[2], Path("."), layout) == []
+    assert calls == []
+    assert tc.candidate_plates(cand, layout.levels[0], Path("."), layout) == ["measured"]
+
+
+def test_only_spotted_levels_are_counted_as_candidates():
+    assert len(_declared_but_unspotted().populated_levels()) == 2

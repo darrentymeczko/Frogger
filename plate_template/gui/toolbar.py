@@ -24,14 +24,10 @@ TOOLS: list[tuple[str, str, str, str]] = [
     ),
     (
         "series", "⇩", "Add dilutions",
-        "Drag from a spot you have already placed, outwards, to where the last "
-        "dilution should land. The direction and number of levels come from the "
-        "drag; the whole run of matching spots beside it comes along.",
-    ),
-    (
-        "control", "◎", "Set control",
-        "Click a spot. Its sample slot becomes this plate's positive control. "
-        "Every plate needs one.",
+        "First select the sources: click a spot to take its whole block, or "
+        "drag a rectangle over just the spots you want. Then drag from inside "
+        "the selection to where the last dilution should land; the block is "
+        "copied there, one dilution further on. Esc clears the selection.",
     ),
     (
         "empty", "▨", "Mark empty",
@@ -131,13 +127,13 @@ class Toolbar(ttk.Frame):
         self.redo_button = self._button("↷", "Redo  (Ctrl+Y)", on_redo)
         self._separator()
 
-        for key, symbol, title, hint in TOOLS:
+        for index, (key, symbol, title, hint) in enumerate(TOOLS, 1):
             button = ttk.Radiobutton(
                 self, text=symbol, value=key, variable=tool,
                 style="Tool.Toolbutton", command=on_tool_change,
             )
             button.pack(side="left", padx=1)
-            Tooltip(button, f"{title}\n{hint}")
+            Tooltip(button, f"{title} (Ctrl+Alt+{index})\n{hint}")
 
         self._separator()
         token_view = ttk.Checkbutton(
@@ -154,19 +150,19 @@ class Toolbar(ttk.Frame):
 
         self._separator()
         self._button(
-            "⊞", "Grid size...\nChange how many rows and columns the "
+            "⊞", "Grid size... (Ctrl+Alt+G)\nChange how many rows and columns the "
             "plate has.", on_grid_size,
         )
         self._button(
-            "＋", "Add plate\nA second physical plate in the same design.",
+            "＋", "Add plate (Ctrl+Alt+N)\nA second physical plate in the same design.",
             on_add_plate,
         )
         self._button(
-            "⧉", "Duplicate this plate\nCopy the layout with every "
+            "⧉", "Duplicate this plate (Ctrl+Alt+C)\nCopy the layout with every "
             "replicate number shifted up.", on_duplicate_plate,
         )
         self._button(
-            "✕", "Delete this plate", on_delete_plate,
+            "✕", "Delete this plate (Ctrl+Alt+X)", on_delete_plate,
         )
 
     def _button(self, symbol: str, tip: str, command) -> ttk.Button:
@@ -193,6 +189,7 @@ class ContextBar(ttk.Frame):
     def __init__(self, master: tk.Misc, tool: tk.StringVar) -> None:
         super().__init__(master, padding=(8, 3))
         self.tool = tool
+        self.spins = {}
 
         self.first_slot = tk.IntVar(value=1)
         self.replicate = tk.IntVar(value=1)
@@ -210,7 +207,7 @@ class ContextBar(ttk.Frame):
         self._spin(self._series, "Spacing", self.spacing, 1, 10)
         ttk.Label(
             self._series,
-            text="drag outwards from a spot to set direction and levels",
+            text="click or drag to select, then drag the selection outwards",
             foreground=theme.MUTED,
         ).pack(side="left")
 
@@ -221,9 +218,22 @@ class ContextBar(ttk.Frame):
         row = ttk.Frame(parent)
         row.pack(side="left", padx=(0, 14))
         ttk.Label(row, text=label).pack(side="left", padx=(0, 4))
-        ttk.Spinbox(row, from_=lo, to=hi, textvariable=variable, width=5).pack(
-            side="left"
-        )
+        spin = ttk.Spinbox(row, from_=lo, to=hi, textvariable=variable, width=5)
+        spin.pack(side="left")
+        self.spins[str(variable)] = spin
+        key = {"First slot": "S", "Replicate": "R", "Dilution": "D"}.get(label)
+        if key:
+            Tooltip(spin, f"Increase {label.lower()}: Ctrl+Alt+{key}")
+
+    def increase(self, name):
+        variable = getattr(self, name)
+        spin = self.spins[str(variable)]
+        try:
+            value = int(variable.get())
+        except (ValueError, tk.TclError):
+            return
+        if value < int(float(spin.cget("to"))):
+            spin.event_generate("<<Increment>>")
 
     def update_visibility(self) -> None:
         tool = self.tool.get()

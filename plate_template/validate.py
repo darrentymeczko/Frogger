@@ -136,25 +136,16 @@ def _check_structure(t: Template, out: list[Issue]) -> None:
 def _check_controls(t: Template, out: list[Issue]) -> None:
     for plate in t.plates:
         if plate.control_slot is None:
-            out.append(
-                Issue(
-                    Severity.ERROR,
-                    "no_control_designated",
-                    f"plate {plate.id!r} has no control sample slot designated",
-                    plate.id,
-                )
-            )
-            continue
+            continue  # Normalization is chosen in final experiment analysis.
 
         control_cells = plate.cells_for_slot(plate.control_slot)
         if not control_cells:
             out.append(
                 Issue(
-                    Severity.ERROR,
+                    Severity.INFO,
                     "no_control_on_plate",
-                    f"plate {plate.id!r} designates slot {plate.control_slot} as its "
-                    f"control but has no spots for it; every strain is relativised "
-                    f"to a control on its own plate",
+                    f"plate {plate.id!r} retains legacy control slot {plate.control_slot} "
+                    f"without spots; choose normalization in final experiment Analysis",
                     plate.id,
                 )
             )
@@ -167,10 +158,10 @@ def _check_controls(t: Template, out: list[Issue]) -> None:
             names = ", ".join(t.dilution.label(d) for d in missing)
             out.append(
                 Issue(
-                    Severity.WARNING,
+                    Severity.INFO,
                     "control_missing_dilution",
-                    f"plate {plate.id!r}: the control has no spot at dilution "
-                    f"{names}, so that level cannot be scored on this plate",
+                    f"plate {plate.id!r}: legacy control has no spot at dilution "
+                    f"{names}; choose normalization in final experiment Analysis",
                     plate.id,
                 )
             )
@@ -179,11 +170,11 @@ def _check_controls(t: Template, out: list[Issue]) -> None:
     if len(designated) > 1:
         out.append(
             Issue(
-                Severity.WARNING,
+                Severity.INFO,
                 "control_differs_between_plates",
-                f"plates designate different control slots ("
-                f"{', '.join(str(s) for s in sorted(designated))}); within one "
-                f"template that is usually an editing slip",
+                f"plates retain different legacy control slots ("
+                f"{', '.join(str(s) for s in sorted(designated))}); "
+                f"choose normalization in final experiment Analysis",
             )
         )
 

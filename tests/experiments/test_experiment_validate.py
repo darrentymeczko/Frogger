@@ -12,6 +12,7 @@ from experiments import profiles, validate
 from experiments.model import QUANTIFY, TIMECOURSE, Condition, Experiment
 from experiments.validate import Severity, blocking
 from plate_template import presets
+from plate_template.model import EMPTY
 
 
 def codes(issues) -> set[str]:
@@ -52,10 +53,11 @@ def test_the_summary_is_always_present():
 # --- controls ---------------------------------------------------------------
 
 
-def test_no_control_designated_is_an_error():
+def test_no_control_is_deferred_to_final_analysis():
     e = good()
     e.control_slot = None
-    assert "no_control" in error_codes(validate.validate(e, template()))
+    assert "no_control" not in error_codes(validate.validate(e, template()))
+    assert any(i.code == "no_control" for i in validate.validate(e, template()))
 
 
 def test_a_control_slot_with_no_strain_is_an_error():
@@ -265,6 +267,37 @@ def test_the_lab_standard_template_is_scorable():
     assert "plate_not_scorable" not in codes(validate.validate(good(), template()))
 
 
+def unmarked_template():
+    """The lab standard as the current Plate Designer saves it: no plate control."""
+    t = template()
+    for plate in t.plates:
+        plate.control_slot = None
+    return t
+
+
+def test_a_template_without_a_plate_control_is_scorable():
+    # The control lives in the experiment; the plate's own field is legacy.
+    issues = validate.validate(good(), unmarked_template())
+    assert "plate_not_scorable" not in codes(issues)
+
+
+def test_the_final_analysis_control_is_enough():
+    e = good()
+    e.control_slot = None
+    e.final_analysis = {"normalization": {"*": 1}, "references": {"*": ["s1"]}}
+    assert "plate_not_scorable" not in codes(validate.validate(e, unmarked_template()))
+
+
+def test_a_control_the_plate_never_spots_is_flagged():
+    t = unmarked_template()
+    plate = t.plate("1")
+    for r, c, p in list(plate.placements()):
+        if p.sample_slot == 1:
+            plate.set(r, c, EMPTY)
+    issues = [i for i in validate.validate(good(), t) if i.code == "plate_not_scorable"]
+    assert len(issues) == 1 and "control slot 1" in issues[0].message
+
+
 # --- photos -----------------------------------------------------------------
 
 
@@ -280,7 +313,7 @@ def test_a_profile_that_cannot_read_a_timepoint_blocks_a_timecourse():
     issue = next(
         i for i in validate.validate(e, template()) if i.code == "profile_incomplete"
     )
-    assert issue.is_error and "timepoint" in issue.message
+    assert issue.is_error and "hours" in issue.message
 
 
 def test_the_same_profile_is_fine_for_handpicked_quantification():

@@ -38,13 +38,14 @@ class BulkCreateDialog(tk.Toplevel):
     """Pick folders, one template and one condition set, then type each panel."""
 
     def __init__(self, parent, out_dir: Path, template_path: str = "",
-                 conditions: list[Condition] | None = None):
+                 conditions: list[Condition] | None = None, *, template=None):
         super().__init__(parent)
         self.title("Create experiments from several folders")
         self.transient(parent.winfo_toplevel())
 
         self.out_dir = Path(out_dir)
-        self.template = None
+        from plate_template.schema import from_dict, to_dict
+        self.template = from_dict(to_dict(template)) if template is not None else None
         self.template_path = template_path
         self.folders: list[Path] = []
         self.conditions = list(conditions or [])
@@ -58,7 +59,7 @@ class BulkCreateDialog(tk.Toplevel):
         self._build_panel(body)
         self._build_buttons(body)
 
-        if self.template_path:
+        if self.template is None and self.template_path:
             self._load_template(self.template_path)
         self._refresh()
 
@@ -325,6 +326,8 @@ class BulkCreateDialog(tk.Toplevel):
     # -- creating ------------------------------------------------------------
 
     def _create(self) -> None:
+        from plate_template.schema import to_dict
+
         if self._problems():
             return
         planned: list[tuple[Path, Experiment]] = []
@@ -333,6 +336,7 @@ class BulkCreateDialog(tk.Toplevel):
                 name=folder.name,
                 template_id=self.template.id,
                 template_path=self.template_path,
+                template_snapshot=to_dict(self.template),
                 strains=self._names(col),
                 control_slot=self._controls[col - 1].get(),
                 conditions=[Condition(c.code, c.label or c.code)

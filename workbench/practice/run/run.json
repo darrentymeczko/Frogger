@@ -1,0 +1,75 @@
+{
+  "kind": "spotting_result_run",
+  "version": 1,
+  "id": "8e2730a8-3781-4d9c-a7dc-aea22def32bc",
+  "created": "2026-11-16T21:27:42.551563+00:00",
+  "name": "Practice run",
+  "sources": [
+    {
+      "id": "source:a321a2a9-9aee-44c7-8c3a-5483c2d537f8",
+      "relpath": "18 Hours/Glucose/Plate 1 (Rep 1+2)/_9.JPG",
+      "original_path": "{{PRACTICE_PHOTOS}}\\18 Hours\\Glucose\\Plate 1 (Rep 1+2)\\_9.JPG",
+      "sha256": "ba865c85e766680d0664ecc91487f217e266c7039bcf01a24956f05082480cfa",
+      "size": 708139
+    },
+    {
+      "id": "source:978606e3-cff2-443b-8a05-b3bf15d19d73",
+      "relpath": "18 Hours/Glucose/Plate 2 (Rep 3+4)/_9.JPG",
+      "original_path": "{{PRACTICE_PHOTOS}}\\18 Hours\\Glucose\\Plate 2 (Rep 3+4)\\_9.JPG",
+      "sha256": "dbec14702f5d6d407f3df8b00c87ca36b575b0d6eea30feed415e06884483abb",
+      "size": 756654
+    },
+    {
+      "id": "source:d59ad468-1c1b-448b-aed4-23f9b3c89a22",
+      "relpath": "22 Hours/Glucose/Plate 1 (Rep 1+2)/_9.JPG",
+      "original_path": "{{PRACTICE_PHOTOS}}\\22 Hours\\Glucose\\Plate 1 (Rep 1+2)\\_9.JPG",
+      "sha256": "3141949191cdbdb81d1455a4e3a7719ad881e325c8bdf0f6d4b0d228a210739b",
+      "size": 697214
+    },
+    {
+      "id": "source:18b5bb58-0558-4342-b2f4-d0177b1f7df8",
+      "relpath": "22 Hours/Glucose/Plate 2 (Rep 3+4)/_9.JPG",
+      "original_path": "{{PRACTICE_PHOTOS}}\\22 Hours\\Glucose\\Plate 2 (Rep 3+4)\\_9.JPG",
+      "sha256": "5cf2a884f3bf20c6a4d33bbb8246050c561cd8f228e7008a9246497c2fa7e1b8",
+      "size": 769818
+    },
+    {
+      "id": "source:bd880523-e45d-49b5-8944-feb3da4b30a3",
+      "relpath": "42 Hours/Glycerol/Plate 1 (Rep 1+2)/_9.JPG",
+      "original_path": "{{PRACTICE_PHOTOS}}\\42 Hours\\Glycerol\\Plate 1 (Rep 1+2)\\_9.JPG",
+      "sha256": "9ecc7654d80c12d30d9c5fbfdb0ec46f6a7bb0dcdcf486e622ba0afcb12bc211",
+      "size": 711826
+    },
+    {
+      "id": "source:d64ae24d-7b39-43ce-b8d7-86d6be696be1",
+      "relpath": "42 Hours/Glycerol/Plate 2 (Rep 3+4)/_9.JPG",
+      "original_path": "{{PRACTICE_PHOTOS}}\\42 Hours\\Glycerol\\Plate 2 (Rep 3+4)\\_9.JPG",
+      "sha256": "5e397fba3cf5d1702de0e7d271d557cc0e8b770fede5a7e8df2d2aac7bbacd48",
+      "size": 763153
+    },
+    {
+      "id": "source:f9d73732-4597-4697-8f84-92843d51b07f",
+      "relpath": "46 Hours/Glycerol/Plate 1 (Rep 1+2)/_9.JPG",
+      "original_path": "{{PRACTICE_PHOTOS}}\\46 Hours\\Glycerol\\Plate 1 (Rep 1+2)\\_9.JPG",
+      "sha256": "8ccb394e73d0ec7bc3bc483b50a4edd17309408239cc9824db032b9cc0ec09e8",
+      "size": 737453
+    },
+    {
+      "id": "source:35d424ad-a7a7-4384-b165-a2b3c6073d22",
+      "relpath": "46 Hours/Glycerol/Plate 2 (Rep 3+4)/_9.JPG",
+      "original_path": "{{PRACTICE_PHOTOS}}\\46 Hours\\Glycerol\\Plate 2 (Rep 3+4)\\_9.JPG",
+      "sha256": "9c4e4a89fbd44ca9243960e2e53f37a7b96bfb2ebc0e1ff0df65c5df36f81f6c",
+      "size": 803991
+    }
+  ],
+  "unresolved_source_assignments": [],
+  "snapshot_warnings": [],
+  "scientific_label": "Practice run",
+  "parent_id": null,
+  "original_photo_root": "{{PRACTICE_PHOTOS}}",
+  "measurement_archive": {
+    "version": 1,
+    "folder": "measurements",
+    "unavailable": []
+  }
+}

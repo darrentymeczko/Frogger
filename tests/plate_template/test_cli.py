@@ -16,14 +16,14 @@ def test_check_accepts_the_shipped_preset(capsys):
 
 def test_check_reports_errors_and_exits_one(tmp_path, capsys):
     broken = json.loads(GOLDEN.read_text(encoding="utf-8"))
-    # Designate a control that is not spotted anywhere on plate 1.
-    broken["plate_slots"][0]["control_slot"] = 9
+    # A genuine geometry error still blocks checking; legacy control hints do not.
+    broken["plate_slots"][0]["cells"][0][0] = "s1r1d9"
     target = tmp_path / "broken.json"
     target.write_text(json.dumps(broken), encoding="utf-8")
 
     assert main(["check", str(target)]) == 1
     out = capsys.readouterr().out
-    assert "no_control_on_plate" in out
+    assert "dil_out_of_range" in out
     assert "NOT ANALYSABLE" in out
 
 

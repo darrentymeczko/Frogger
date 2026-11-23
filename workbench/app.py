@@ -1,6 +1,6 @@
 """Workbench entry point.
 
-    py spotting_app.py                       the usual way (run_workbench.bat)
+    py spotting_app.py                       the usual way (run_frogger.bat)
     py -m workbench [file or folder ...]     open these as well
     py -m workbench --selftest               build the window, open one of
                                              each document, close, exit 0
@@ -39,7 +39,7 @@ def _taskbar_identity() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="workbench",
-                                     description="Spotting Quantification")
+                                     description="Frogger")
     parser.add_argument("paths", nargs="*",
                         help="plate templates, experiments or result folders "
                              "to open")
@@ -51,6 +51,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     _ensure_stdio()
+    # A crash Python cannot catch (in Tk or a native library) leaves its
+    # stack here instead of the window simply vanishing.
+    import faulthandler
+    from .settings import ROOT
+    try:
+        faulthandler.enable(open(ROOT / "workbench_crash.log", "a", encoding="utf-8"))
+    except OSError:
+        pass
     # The review tool draws figures off the main thread. With a Tk loop running,
     # pyplot's default backend would be TkAgg, which must not be touched off
     # the main thread; the figures are only ever saved, so Agg is right.
@@ -65,7 +73,8 @@ def main(argv: list[str] | None = None) -> int:
     root = tk.Tk()
     settings = Settings(read_only=args.selftest)
     shell = Shell(root, settings, restore=not (args.no_restore or args.selftest
-                                               or args.paths))
+                                               or args.paths),
+                  tour=not args.selftest)
     for path in args.paths:
         shell.open_path(Path(path))
 

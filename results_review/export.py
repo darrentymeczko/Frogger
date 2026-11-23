@@ -22,10 +22,28 @@ from pathlib import Path
 
 from .discovery import SetRun, safe_name
 from .model import Review
+from .presentation import medium_label
 from .rebuild import Frame
 
 CSV_NAME = "spotting_results_normalized.csv"
 SUMMARY_NAME = "chosen_summary.csv"
+
+
+def export_source_manifest(run, cfg=None):
+    """Protection also covers unsaved legacy runs with resolved assignments."""
+    from copy import deepcopy
+    manifest=deepcopy(getattr(run,"manifest",{}))
+    experiment=getattr(run,"experiment",None)
+    cfg=cfg or (experiment.pipeline_config if experiment else {})
+    sources=manifest.setdefault("sources",[])
+    known={s.get("relpath") for s in sources}
+    recorded_root=getattr(experiment,"photo_root",None)
+    for p in cfg.get("resolved_photos",[]):
+        rel=p.get("relpath")
+        if rel and rel not in known:
+            sources.append({"relpath":rel,**({"original_path":str(Path(recorded_root)/rel)} if recorded_root else {})})
+            known.add(rel)
+    return manifest
 
 
 def deck_name(run: SetRun) -> str:
@@ -89,7 +107,7 @@ class ExportResult:
         return bool(self.files or self.csv_path)
 
 
-def named_frames(run: SetRun, frames: list[Frame]) -> list[Frame]:
+def named_frames(run: SetRun, frames: list[Frame], review: Review | None = None) -> list[Frame]:
     """The frames as an export names them: in the experiment's own words.
 
     A frame's `experiment` ("Set11 K-OACNAA 40 Hours") is built from the
@@ -102,7 +120,9 @@ def named_frames(run: SetRun, frames: list[Frame]) -> list[Frame]:
     from collections import Counter
     from dataclasses import replace
 
-    names = {f.medium: f"{run.label} {run.medium_label(f.medium)} "
+    from .presentation import result_label, medium_label
+    review = review or Review()
+    names = {f.medium: f"{result_label(run, review)} {medium_label(run, review, f.medium)} "
                        f"{f.candidate.timepoint}" for f in frames}
     taken = Counter(safe_name(n).casefold() for n in names.values())
     out = []
@@ -112,7 +132,7 @@ def named_frames(run: SetRun, frames: list[Frame]) -> list[Frame]:
             name = frame.experiment
         out.append(replace(frame, experiment=name,
                            tidy=frame.tidy.assign(experiment=name,
-                                                  treatment=name)))
+                                                  treatment=name, analysis_condition=frame.medium)))
     return out
 
 
@@ -161,16 +181,21 @@ def write_summary(run: SetRun, review: Review, frames: list[Frame],
                     "best_set_score",
                     "median_CV", "n_significant", "n_strains", "n_edited_spots",
                     "statistical_test", "p_adjust", "posthoc",
-                    "comparisons", "p_cutoff", "reason"])
+                    "comparisons", "p_cutoff", "reason", "quality_flags",
+                    "derived_unavailable_reasons", "candidate_metrics_status",
+                    "normalization_slot", "comparison_references"])
         for f in frames:
             c = f.candidate
             pick = review.pick(f.medium)
             extras = list(c.extra_plates) + [""] * (n_extra - len(c.extra_plates))
+            stale = rv.analysis_changed(run, review)
+            from experiments.analysis import references
             w.writerow([f.medium, f.experiment, c.timepoint, c.dilution,
                         c.plate1, c.plate2, *extras,
                         rv.is_default(run, review, f.medium),
-                        f"{c.best_set_score:.4f}", f"{c.median_cv:.4f}",
-                        c.n_significant, c.n_strains, f.n_edited,
+                        "" if stale else f"{c.best_set_score:.4f}",
+                        "" if stale else f"{c.median_cv:.4f}",
+                        "" if stale else c.n_significant, "" if stale else c.n_strains, f.n_edited,
                         review.statistical_test,
                         review.p_adjust if review.statistical_test == "t_test"
                         else "not applicable",
@@ -178,7 +203,11 @@ def write_summary(run: SetRun, review: Review, frames: list[Frame],
                         else "not applicable",
                         review.comparisons_text(),
                         review.alpha,
-                        (pick.reason if pick else "")])
+                        (pick.reason if pick else ""), c.quality_flags,
+                        "; ".join(dict.fromkeys(str(r) for r in
+                            f.tidy.get("normalization_reason", []) if isinstance(r, str) and r)),
+                        "invalidated; rerun candidate selection" if stale else "original run",
+                        f.control_col, "; ".join(references(review.final_analysis, f.medium))])
     return path
 
 
@@ -381,25 +410,32 @@ def slide_picture(sheet: Path, graph: Path, outdir: Path, mode: str = "fit",
             picture = ss.view(im, "fit", SLIDE_PX, False)
             note = f"shown as Fit: {exc}"
     out = outdir / f"slide_{Path(graph).stem}.png"
-    picture.save(out, format="PNG")
+    from PIL.PngImagePlugin import PngInfo
+    info = PngInfo()
+    info.add_text("spotting-display", "presentation export; use original photo for measurement")
+    picture.save(out, format="PNG", pnginfo=info)
     return out, note
 
 
-def fit_sheet(sheet, box: tuple, mode: str = "fit", rotate: bool = False):
+def fit_sheet(sheet, box: tuple, mode: str = "fit", rotate: bool = False,
+              with_map: bool = False):
     """A sheet shown as `mode` ("fit" or "aligned"), with its graph turned on
     its side if `rotate`, and fitted to a display box.
 
     Here rather than in the window code because it is the engine's layout:
     the window reaches the engine only through this module and rebuild.py.
     Raises ValueError with a readable reason when this sheet cannot be shown
-    that way.
+    that way. `with_map` returns (image, spots, plates) -- where each
+    quantified spot landed, and where the plate is (`spotting_sheet.
+    view_spots`).
     """
     import spotting_sheet as ss
 
     try:
-        return ss.view(sheet, mode, box, rotate)
+        im, spots, plates = ss.view_spots(sheet, mode, box, rotate)
     except ss.ViewUnavailable as e:
         raise ValueError(str(e)) from None
+    return (im, spots, plates) if with_map else im
 
 
 def _legacy_montage_right(sheet, height: int) -> int:
@@ -439,13 +475,15 @@ def draw_montages(root: Path, frames: list[Frame], cfg: dict, outdir: Path,
 
     cache_dir = Path(cache_dir or PROJECT_ROOT / ".spotting_cache")
     jobs, outs, failed = [], {}, {}
+    from spotting_roi import settings_from_config
+    measurement = settings_from_config(cfg, legacy_if_missing=True)
     for frame in frames:
         out = Path(outdir) / "montages" / f"montage_{safe_name(frame.experiment)}.png"
         try:
             cand = pipeline_candidate(root, frame.candidate, cfg)
             jobs.append(tc.montage_job(cand, rows_for(frame.candidate, cfg),
                                        cfg["strains"], out, cache_dir,
-                                       frame.experiment, layout_for(cfg)))
+                                       frame.experiment, layout_for(cfg), measurement))
         except Exception as exc:
             failed[frame.medium] = f"{type(exc).__name__}: {exc}"
             continue
@@ -459,6 +497,8 @@ def draw_montages(root: Path, frames: list[Frame], cfg: dict, outdir: Path,
         # same work is still valid one montage at a time.
         workers = 1
     workers = min(workers, len(jobs)) or 1
+    if not jobs:
+        return {}, failed
     # Its progress line is for a console; the export reports its own.
     with contextlib.redirect_stdout(io.StringIO()):
         try:
@@ -546,6 +586,17 @@ def export_review(run: SetRun, review: Review, media: list[str], root: Path,
     A complete deck matters more than producing a misleading partial one.
     """
     from .review import chosen_candidate
+    if getattr(run, "manifest", {}):
+        cfg = {**cfg, "_run_dir": str(run.results_dir),
+               "_run_root": str(root), "_run_label": run.manifest.get("scientific_label", run.label),
+               "_run_sources": run.manifest.get("sources", [])}
+    from experiments.analysis import apply, check_panel
+    cfg = apply(cfg, review.final_analysis)
+    if review.final_analysis:
+        check_panel(review.final_analysis, cfg.get("strains", []), media,
+                    {m: v.get("exclude", []) for m, v in cfg.get("media", {}).items()})
+    if review.measurement:
+        cfg = {**cfg, "measurement": dict(review.measurement)}
     from .rebuild import rebuild
 
     if not options.any_selected or not media:
@@ -559,23 +610,25 @@ def export_review(run: SetRun, review: Review, media: list[str], root: Path,
     for medium in media:
         if medium not in run.media:
             raise ValueError(f"Unknown treatment: {medium}")
+        if not review.is_included(medium):
+            continue
         candidate = chosen_candidate(run, review, medium)
         if candidate is None:
             raise ValueError("Choose a current candidate for "
-                             f"{run.medium_label(medium)} first.")
+                             f"{medium_label(run, review, medium)} first.")
         if progress:
-            progress(f"rebuilding chosen photo set: {run.medium_label(medium)}…")
+            progress(f"rebuilding chosen photo set: {medium_label(run, review, medium)}…")
         frames.append(rebuild(root, run.label, cfg, candidate,
                               review.edits_for(medium), data_flags=data_flags))
     return export(run, review, frames, root, cfg, options=options,
-                  outdir=outdir, progress=progress)
+                  outdir=outdir, progress=progress, data_flags=data_flags)
 
 
 def export(run: SetRun, review: Review, frames: list[Frame], root: Path,
            cfg: dict, *, figures: bool = True, montages: bool = True,
            progress=None, cache_dir: "Path | None" = None,
            options: "ExportOptions | None" = None,
-           outdir: "Path | None" = None) -> ExportResult:
+           outdir: "Path | None" = None, data_flags=None) -> ExportResult:
     """Publish only requested outputs; generate dependencies in fresh scratch.
 
     Fresh scratch prevents old candidates or stale graphs from entering a deck.
@@ -596,7 +649,26 @@ def export(run: SetRun, review: Review, frames: list[Frame], root: Path,
     if not frames:
         out.warnings.append("nothing to export -- no medium could be rebuilt")
         return out
-    frames = named_frames(run, frames)
+    frames = [f for f in frames if review.is_included(f.medium)]
+    if not frames:
+        out.warnings.append("nothing to export — every requested treatment is explicitly excluded")
+        return out
+    if review.final_analysis:
+        from experiments.analysis import apply, normalization, check_panel
+        from .rebuild import rebuild
+        cfg = apply(cfg, review.final_analysis)
+        check_panel(review.final_analysis, cfg.get("strains", []), [f.medium for f in frames],
+                    {m: v.get("exclude", []) for m, v in cfg.get("media", {}).items()})
+        if review.measurement:
+            cfg = {**cfg, "measurement": dict(review.measurement)}
+        if data_flags is None:
+            from .datareview import load_flags
+            data_flags = load_flags(run)
+        frames = [rebuild(root, run.label, cfg, f.candidate, review.edits_for(f.medium),
+                          cache_dir=cache_dir, data_flags=data_flags)
+                  if f.control_col != normalization(review.final_analysis, f.medium) else f
+                  for f in frames]
+    frames = named_frames(run, frames, review)
 
     def say(message):
         if progress:
@@ -606,22 +678,21 @@ def export(run: SetRun, review: Review, frames: list[Frame], root: Path,
     # A scratch folder beside the outputs also permits atomic per-file replace.
     with tempfile.TemporaryDirectory(prefix=".review-export-", dir=outdir) as tmp:
         work = Path(tmp)
+        pending = {}
 
         def publish(path):
             dest = outdir / path.relative_to(work)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            # Copy to a temporary sibling before replacing an existing export.
-            staging = work / "publish.tmp"
-            shutil.copy2(path, staging)
-            try:
-                staging.replace(dest)
-            except PermissionError:
-                # Opened since the check: say so, not "[WinError 5] ...".
-                raise RuntimeError(in_use_message([dest])) from None
-            out.files.append(dest)
+            pending[dest] = path
             return dest
 
         need_graphs = options.figures or options.statistics or options.powerpoint
+        if review.final_analysis:
+            import json
+            metadata = work / "final_analysis.json"
+            metadata.write_text(json.dumps({"final_analysis": review.final_analysis,
+                "statistics": review.statistics_kwargs(), "measurement": cfg.get("measurement", {}),
+                "included_conditions": [f.medium for f in frames]}, indent=2), encoding="utf-8")
+            publish(metadata)
         csv_path = None
         if options.data or need_graphs:
             say(f"writing {CSV_NAME}…")
@@ -668,7 +739,7 @@ def export(run: SetRun, review: Review, frames: list[Frame], root: Path,
                 sheet = run.sheet(frame.candidate)
                 if graph is None or not sheet.exists():
                     continue
-                name = run.medium_label(frame.medium)
+                name = medium_label(run, review, frame.medium)
                 try:
                     slides[frame.medium], note = slide_picture(
                         sheet, graph, work / "slides", options.view,
@@ -696,7 +767,7 @@ def export(run: SetRun, review: Review, frames: list[Frame], root: Path,
                         out.montages.append(publish(photos[frame.medium]))
                 else:
                     out.warnings.append(
-                        f"montage for {run.medium_label(frame.medium)} failed: "
+                        f"montage for {medium_label(run, review, frame.medium)} failed: "
                         f"{failed.get(frame.medium, 'no montage was generated')}")
 
         if options.powerpoint:
@@ -706,7 +777,7 @@ def export(run: SetRun, review: Review, frames: list[Frame], root: Path,
 
                 pages = []
                 for frame in frames:
-                    name = run.medium_label(frame.medium)
+                    name = medium_label(run, review, frame.medium)
                     montage = photos.get(frame.medium)
                     graph = graphs.get(f"spotting_{safe_name(frame.experiment)}.png")
                     if frame.medium in slides:
@@ -729,5 +800,22 @@ def export(run: SetRun, review: Review, frames: list[Frame], root: Path,
                                                          work / deck_name(run)))
             except Exception as exc:
                 out.warnings.append(f"PowerPoint failed: {exc}")
+        # Stage all requested outputs first: a late SVG/sidecar/deck collision
+        # must not leave earlier destination files overwritten. Scratch is
+        # generated under a fresh unique folder, never at an original path.
+        from .runs import preflight_export_paths
+        preflight_export_paths(list(pending),export_source_manifest(run,cfg),root)
+        for dest,path in pending.items():
+            dest.parent.mkdir(parents=True,exist_ok=True)
+            staging=work/"publish.tmp"
+            shutil.copy2(path,staging)
+            try:staging.replace(dest)
+            except PermissionError:
+                if dest == out.powerpoint:
+                    out.powerpoint = None
+                    out.warnings.append("PowerPoint failed: "+in_use_message([dest]))
+                    continue
+                raise RuntimeError(in_use_message([dest])) from None
+            out.files.append(dest)
     say("done")
     return out

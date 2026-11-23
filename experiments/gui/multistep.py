@@ -72,7 +72,7 @@ class MultiStepDialog(tk.Toplevel):
             ttk.Label(hour_box, text="Resolve photos on Data first").pack(side="left")
         note = ttk.Label(body, justify="left", wraplength=1000, text=(
             "Technical replicates alone analyse each selected hour separately; repeated measures need at least two hours and analyse them together. "
-            "The same dilution is used at every selected hour. Each strain is compared with the control "
+            "The same dilution is used at every selected hour. Each requested pair from final Analysis is matched "
             "in its biological block (the template replicate number). Two-step averages technical log ratios "
             "before inference; full hierarchical retains every plate observation. Mixed-model tests are approximate, "
             "especially with few biological replicates. Holm correction covers all tests within each condition.\n\n"

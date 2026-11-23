@@ -128,16 +128,15 @@ def _check_panel(e: Experiment, out: list[Issue]) -> None:
 
 
 def _check_controls(e: Experiment, out: list[Issue]) -> None:
-    if e.control_slot is None:
+    if not e.final_analysis and e.control_slot is None:
         out.append(
             Issue(
-                Severity.ERROR,
+                Severity.INFO,
                 "no_control",
-                "no sample slot is designated as the positive control; every "
-                "strain is reported relative to one",
+                "Choose normalization in the final Analysis / comparisons tab before running",
             )
         )
-    elif not e.strain(e.control_slot):
+    elif not e.final_analysis and not e.strain(e.control_slot):
         out.append(
             Issue(
                 Severity.ERROR,
@@ -487,15 +486,37 @@ def _check_template(e: Experiment, template, out: list[Issue]) -> None:
                 )
             )
 
+    # The control comes from the experiment -- per condition, or the final
+    # Analysis normalization -- never from the template plate, whose own
+    # control_slot is a legacy field a current design usually leaves unset.
+    controls = {
+        slot
+        for slot in (e.control_for(code) for code in e.condition_codes() or ["*"])
+        if slot is not None
+    }
     for plate in template.plates:
+        if not plate.units():
+            continue
         if not plate.scorable_dilutions():
             out.append(
                 Issue(
                     Severity.WARNING,
                     "plate_not_scorable",
                     f"template plate {plate.id!r} has no dilution level where "
-                    f"every sample and the control are all present, so it "
-                    f"cannot be quantified as designed",
+                    f"every sample and replicate is spotted, so it cannot be "
+                    f"quantified as designed",
+                )
+            )
+            continue
+        absent = sorted(controls - plate.slots_present())
+        if absent:
+            out.append(
+                Issue(
+                    Severity.WARNING,
+                    "plate_not_scorable",
+                    f"template plate {plate.id!r} has no spots for control "
+                    f"slot {', '.join(map(str, absent))}, so its spots cannot "
+                    f"be relativised to a control on the same plate",
                 )
             )
 
@@ -515,8 +536,13 @@ def _check_photos(e: Experiment, out: list[Issue]) -> None:
             )
         )
 
+    # Any source counts: detected names, the photo order, keyword rules or
+    # hand corrections. Whether every photo actually ended up with a value is
+    # `check_resolution`'s job (`unresolved_photos`), which sees the files;
+    # this only catches the facet nobody has said anything about at all.
     profile: NamingProfile = e.profile
-    have = profile.facets() | set(e.order_facets())
+    have = (profile.facets() | set(e.order_facets())
+            | set(e.keyword_facets()) | set(e.override_facets()))
     missing = [f for f in REQUIRED_FACETS.get(e.mode, ()) if f not in have]
     if missing:
         why = (
@@ -524,14 +550,20 @@ def _check_photos(e: Experiment, out: list[Issue]) -> None:
             if e.mode == TIMECOURSE
             else "this is needed to know what each photo is"
         )
+        names = {"condition": "treatment", "timepoint": "hours", "plate": "plate number"}
         out.append(
             Issue(
                 Severity.ERROR,
                 "profile_incomplete",
-                f"the naming profile cannot read "
-                f"{', '.join(missing)} out of the photo paths; {why}",
+                f"nothing says each photo's {', '.join(names.get(f, f) for f in missing)}; {why}. "
+                "Add a keyword rule, use the photo order, or assign the photos in Data",
             )
         )
+    for rule in e.keywords:
+        try:
+            rule.check()
+        except Exception as exc:
+            out.append(Issue(Severity.ERROR, "keyword_invalid", f"keyword rule: {exc}"))
 
     try:
         profile.check()

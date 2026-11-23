@@ -31,7 +31,7 @@ HEAVY = {"spotting_quant", "spotting_batch", "spotting_timecourse",
          "numpy", "pandas", "scipy", "skimage", "matplotlib", "tifffile"}
 
 #: Modules that may import the heavy stack at all (inside functions).
-MAY_USE_ENGINE = {"rebuild.py", "export.py", "cli.py", "controller.py"}
+MAY_USE_ENGINE = {"rebuild.py", "export.py", "cli.py", "controller.py", "measurements.py"}
 
 
 def modules() -> list[Path]:
@@ -121,11 +121,3 @@ def test_nothing_writes_to_the_pipelines_own_output():
                 offenders.append(f"{path.name}:{i}: {line.strip()}")
     assert not offenders, "these lines look like writes into best/:\n" + \
         "\n".join(offenders)
-
-
-def test_the_launcher_exists_and_runs_this_package():
-    bat = ROOT / "run_review.bat"
-    assert bat.exists(), "run_review.bat is how this is actually started"
-    text = bat.read_text(encoding="utf-8", errors="replace")
-    assert "results_review.app" in text
-    assert "results_review.cli" in text
