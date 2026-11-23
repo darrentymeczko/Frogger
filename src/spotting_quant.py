@@ -60,6 +60,7 @@ Run with --debug for detection diagnostics.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -128,6 +129,10 @@ def load_gray8(path: Path, rgb_mode: str = DEFAULT_RGB_MODE,
     >> 8; float input passes through unscaled. A per-image min..max stretch is
     deliberately NOT applied -- it would destroy comparability between plates
     and would silently rescale the 32-bit TIFFs the Fiji cross-check writes.
+
+    Coordinates refer to stored pixels, without EXIF rotation or mirroring.
+    Photo previews and montages use this same convention; camera turns belong
+    to the experiment's explicit Photo orientation setting, not EXIF metadata.
     """
     if rgb_mode not in ("unweighted", "weighted"):
         raise ValueError(f"rgb_mode must be 'unweighted' or 'weighted', got {rgb_mode!r}.")
@@ -137,8 +142,11 @@ def load_gray8(path: Path, rgb_mode: str = DEFAULT_RGB_MODE,
         import tifffile
         arr = tifffile.imread(str(path))
     else:
-        from PIL import Image
-        arr = np.asarray(Image.open(path))
+        from spotting_pixels import open_pixels
+        with open_pixels(path) as source:
+            if any(k in source.info for k in ("spotting-sheet", "spotting-spots", "spotting-display")):
+                raise ValueError("A generated display/export image cannot be quantified; select the original photograph.")
+            arr = np.asarray(source)
 
     arr = np.asarray(arr)
     if arr.ndim == 3:                       # drop alpha, collapse to luminance
@@ -477,6 +485,10 @@ class Grid:
                                  # the ROI for any row choice in ~0 time, which
                                  # is what lets every dilution be precomputed:
                                  # detection is 41s, the shrink is 0.9s.
+    boundary_radii: np.ndarray | None = None  # 72 source-coordinate ray lengths
+    boundary_quality: np.ndarray | None = None
+    interior_quality: np.ndarray | None = None
+    roi_settings: object = None  # None identifies historical fixed-oval geometry
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -1048,6 +1060,7 @@ def refine_centers_fullres(img8: np.ndarray, centers: np.ndarray,
     disk_area = float(disk.sum())
 
     n_spots = flat_c.shape[0]
+    colony_ref = _colony_level(img8, flat_c, rr_k, pitch)
     cand = np.zeros((2, n_spots, 2))          # [brightness, texture] x spot x (dy, dx)
     peak = np.full((2, n_spots), -np.inf)
     pin = np.ones((2, n_spots), bool)
@@ -1072,6 +1085,9 @@ def refine_centers_fullres(img8: np.ndarray, centers: np.ndarray,
                              np.ones(int(agar.sum()))])
         co, *_ = np.linalg.lstsq(A, P[agar].ravel(), rcond=None)
         flat = (P - (co[0] * ys + co[1] * xs + co[2])) * valid
+        # A contaminant beside the spot would drag the disc toward it; read it
+        # as agar instead. 16h GLU P1 r4c7 sat ~60px off its spot before this.
+        flat[_contaminant_mask(flat, colony_ref, rr_k)] = 0.0
         # Texture as a second, independent signal. Brightness is the sharper cue
         # on a well-grown spot, but near the rim it rides the plate's smooth
         # brightness gradient and slides outward; texture cannot, because the
@@ -1149,6 +1165,55 @@ def refine_centers_fullres(img8: np.ndarray, centers: np.ndarray,
               f"max {moved.max():.1f}px, {int(strong.sum())}/{n_spots} measured "
               f"directly ({n_tex} rescued by texture)")
     return (flat_c + final).reshape(n_rows, n_cols, 2)
+
+
+# A contaminant colony is solid, brighter than the plate's own well-grown
+# spots, and much smaller than a spot. The lower size bound keeps the bright
+# wrinkles inside overgrown spots (<2% of a spot) out; the upper bound keeps a
+# whole dense spot out.
+CONTAM_BRIGHT = 1.3           # x the plate's colony brightness
+CONTAM_MIN_AREA = 0.05        # of the spot's area
+CONTAM_MAX_AREA = 0.35
+CONTAM_SOLID = 0.08           # opening radius, of the spot radius: drops thin rims
+
+
+def _colony_level(img8: np.ndarray, centers: np.ndarray, r: float,
+                  pitch: float) -> float:
+    """Typical bright-growth level above agar: the median 95th percentile of the
+    brighter half of the spots, so faint media get a faint reference."""
+    H, W = img8.shape
+    k = int(round(0.45 * pitch))
+    yy, xx = np.mgrid[-k:k + 1, -k:k + 1]
+    rr = np.hypot(yy, xx)
+    levels = []
+    for cy, cx in centers:
+        y, x = int(round(cy)), int(round(cx))
+        if y - k < 0 or x - k < 0 or y + k >= H or x + k >= W:
+            continue
+        P = img8[y - k:y + k + 1, x - k:x + k + 1]
+        levels.append(float(np.percentile(P[rr < r], 95)) - float(np.median(P[rr > 0.40 * pitch])))
+    if not levels:
+        return np.inf
+    levels = np.array(levels)
+    return float(np.median(levels[levels >= np.median(levels)]))
+
+
+def _contaminant_mask(flat: np.ndarray, colony_ref: float, r: float) -> np.ndarray:
+    """Pixels of compact blobs too bright and too small to be the spot itself."""
+    from scipy import ndimage as ndi
+    if not np.isfinite(colony_ref) or colony_ref <= 0:
+        return np.zeros(flat.shape, bool)
+    k = max(2, int(round(CONTAM_SOLID * r)))
+    yy, xx = np.mgrid[-k:k + 1, -k:k + 1]
+    solid = ndi.binary_opening(flat > CONTAM_BRIGHT * colony_ref, yy ** 2 + xx ** 2 <= k * k)
+    lab, n = ndi.label(solid)
+    if not n:
+        return solid
+    area = np.pi * r * r
+    sizes = np.bincount(lab.ravel())
+    keep = (sizes >= CONTAM_MIN_AREA * area) & (sizes <= CONTAM_MAX_AREA * area)
+    keep[0] = False
+    return ndi.binary_dilation(keep[lab], iterations=k)
 
 
 # Fraction of the spot's core texture that marks the edge of the growth. The
@@ -2042,7 +2107,7 @@ class MeasureOptions:
     and the calibration harness cannot drift apart.
     """
     rois: Path | None = None              # measure at these ROIs, skip detection
-    measure_diameter: float | None = None  # force ROI diameter (px)
+    measure_diameter: float | None = None  # nominal cap before margin; exact for legacy
     ball_radius: float | None = None      # force rolling-ball radius (px)
     bg_mode: str = "python"               # python | rollingball | none
     bg_iters: int = BG_ITERS
@@ -2058,6 +2123,16 @@ class MeasureOptions:
     # be served for a 12x8 request.
     n_rows: int | None = None
     n_cols: int | None = None
+    roi_method: str = "centered-interior-v1"
+    inward_margin: float = 0.15
+    min_interior_pixels: int = 25
+
+    @property
+    def roi_settings(self):
+        from spotting_roi import ROISettings, LEGACY_METHOD
+        return ROISettings(self.roi_method,
+                           0.0 if self.roi_method == LEGACY_METHOD else self.inward_margin,
+                           self.min_interior_pixels)
 
     @property
     def grid_shape(self) -> tuple[int, int]:
@@ -2178,17 +2253,18 @@ def export_rois(grid: Grid, bg_centers: list[tuple[float, float]],
 
     def add(kind: str, row, col, bg_index, cy: float, cx: float, name: str) -> None:
         bx, by = cx - r, cy - r
+        from spotting_roi import INTERIOR_METHOD
+        interior = grid.roi_settings is not None and grid.roi_settings.method == INTERIOR_METHOD
+        x, y, diam = (bx, by, d) if interior else (round(bx), round(by), round(d))
         rows.append({"kind": kind, "row": row, "col": col, "bg_index": bg_index,
-                     "bx": int(round(bx)), "by": int(round(by)),
-                     "width": int(round(d)), "height": int(round(d))})
-        macro.append(f'makeOval({int(round(bx))}, {int(round(by))}, '
-                     f'{int(round(d))}, {int(round(d))}); '
+                     "bx": x, "by": y, "width": diam, "height": diam})
+        macro.append(f'makeOval({x}, {y}, {diam}, {diam}); '
                      f'roiManager("add"); '
                      f'roiManager("select", roiManager("count")-1); '
                      f'roiManager("rename", "{name}");')
 
-    for i in range(N_ROWS):
-        for j in range(N_COLS):
+    for i in range(grid.shape[0]):
+        for j in range(grid.shape[1]):
             cy, cx = grid.centers[i, j]
             add("spot", i + 1, j + 1, "", cy, cx, f"spot_r{i+1}c{j+1}")
     for k, (cy, cx) in enumerate(bg_centers, start=1):
@@ -2202,6 +2278,9 @@ def export_rois(grid: Grid, bg_centers: list[tuple[float, float]],
     pd.DataFrame(rows, columns=ROI_COLUMNS).to_csv(csv_path, index=False,
                                                    encoding="utf-8-sig")
     ijm_path.write_text("\n".join(macro) + "\n", encoding="utf-8")
+    if grid.roi_settings is not None:
+        stem.with_suffix(".measurement.json").write_text(
+            json.dumps(grid.roi_settings.to_dict(), indent=2), encoding="utf-8")
     return csv_path, ijm_path
 
 
@@ -2220,6 +2299,8 @@ class PlateMeasurement:
     n_px: np.ndarray              # N_ROWS x N_COLS pixel counts per ROI
     bg_n_px: list[int]
     rim_flag: np.ndarray          # N_ROWS x N_COLS bool; ROI may touch rim glare
+    roi_boxes: np.ndarray | None = None  # exact x,y,width,height, stored pixels
+    quality: np.ndarray | None = None
 
 
 def measure_plate(img: np.ndarray, grid: Grid,
@@ -2236,8 +2317,10 @@ def measure_plate(img: np.ndarray, grid: Grid,
     correlation with hand measurements in precisely the faint regime that
     matters and poisons every ratio whose denominator was clipped.
     """
-    r = max(3.0, grid.measure_radius)
-    d = float(round(2 * r))
+    from spotting_roi import INTERIOR_METHOD
+    interior = grid.roi_settings is not None and grid.roi_settings.method == INTERIOR_METHOD
+    r = grid.measure_radius if interior else max(3.0, grid.measure_radius)
+    d = 2 * r if interior else float(round(2 * r))
 
     # Snap every ROI's bounding box to integer pixel offsets. ImageJ's OvalRoi
     # has integer x/y/width/height, so a selection dragged between spots keeps a
@@ -2246,7 +2329,8 @@ def measure_plate(img: np.ndarray, grid: Grid,
     # itself shifts the gray value. With float offsets the mask silently varies
     # by ~0.1% between spots; snapping makes every ROI exactly congruent.
     def read(cy: float, cx: float) -> tuple[float, int]:
-        return _roi_mean(img, round(cx - d / 2), round(cy - d / 2), d, d)
+        bx, by = (cx-d/2, cy-d/2) if interior else (round(cx-d/2), round(cy-d/2))
+        return _roi_mean(img, bx, by, d, d)
 
     bg_reads = [read(cy, cx) for cy, cx in bg_centers]
     bg_samples = [m for m, _ in bg_reads]
@@ -2255,15 +2339,37 @@ def measure_plate(img: np.ndarray, grid: Grid,
     n_rows, n_cols = grid.shape
     raw = np.zeros((n_rows, n_cols))
     n_px = np.zeros((n_rows, n_cols), dtype=int)
+    boxes = np.zeros((n_rows, n_cols, 4))
+    quality = (grid.interior_quality.copy() if interior else
+               np.full(grid.shape, "legacy_unverified", dtype="U64"))
+    # Only a reading that is itself invalid drops a spot: a circle hanging off
+    # the photo, or too few pixels to average. A boundary that could not be
+    # traced, is irregular, or is smaller than the shared circle stays a note in
+    # `quality`. The circle sits on the lattice centre either way, and the
+    # spots without a traceable edge are mostly faint or empty ones -- dropping
+    # those deletes the no-growth phenotypes (the v3 lesson in spotting_batch).
+    unmeasurable = np.zeros(grid.shape, bool)
     for i in range(n_rows):
         for j in range(n_cols):
             cy, cx = grid.centers[i, j]
             raw[i, j], n_px[i, j] = read(cy, cx)
+            bx, by = (cx-d/2, cy-d/2) if interior else (round(cx-d/2), round(cy-d/2))
+            boxes[i, j] = (bx, by, d, d)
+            if interior and (bx < 0 or by < 0 or bx+d > img.shape[1] or by+d > img.shape[0]):
+                quality[i, j] = "clipped_interior"
+                unmeasurable[i, j] = True
+            if interior and n_px[i, j] < grid.roi_settings.min_pixels:
+                quality[i, j] = "insufficient_interior"
+                unmeasurable[i, j] = True
+
+    if interior:
+        grid.interior_quality = quality
+    flags = rim_flags(grid) | unmeasurable
 
     return PlateMeasurement(raw=raw, net=raw - bg_mean, bg_mean=bg_mean,
                             bg_samples=bg_samples, n_px=n_px,
                             bg_n_px=[n for _, n in bg_reads],
-                            rim_flag=rim_flags(grid))
+                            rim_flag=flags, roi_boxes=boxes, quality=quality)
 
 
 # ---------------------------------------------------------------------------
@@ -2314,19 +2420,26 @@ def render_overlay(img: np.ndarray, grid: Grid, name: str,
     # range so matplotlib's autoscaling cannot silently restretch the contrast
     # and make a faint plate look strong (or vice versa).
     lo, hi = float(np.percentile(img, 1)), float(np.percentile(img, 99.5))
-    ax.imshow(img, cmap="gray", vmin=lo, vmax=max(hi, lo + 1e-6))
+    ax.imshow(img, cmap="gray", vmin=lo, vmax=max(hi, lo + 1e-6), origin="upper")
 
     r = grid.measure_radius
-    for i in range(N_ROWS):
-        for j in range(N_COLS):
+    for i in range(grid.shape[0]):
+        for j in range(grid.shape[1]):
             cy, cx = grid.centers[i, j]
-            ax.add_patch(plt.Circle((cx, cy), r, fill=False, color="lime", lw=1))
+            if grid.boundary_radii is not None:
+                from spotting_roi import boundary_xy
+                points = boundary_xy((cy, cx), grid.boundary_radii[i, j])
+                points = np.vstack((points, points[0]))
+                ax.plot(points[:, 0], points[:, 1], color="#FFCE54", lw=0.8, ls="--")
+            bad = grid.interior_quality is not None and bool(grid.interior_quality[i, j])
+            ax.add_patch(plt.Circle((cx, cy), r, fill=False,
+                                   color="orangered" if bad else "cyan", lw=1))
             ax.text(cx, cy, f"{i+1},{j+1}", color="yellow", fontsize=6,
                     ha="center", va="center")
     for cy, cx in (bg_centers or []):
         ax.add_patch(plt.Circle((cx, cy), r, fill=False, color="red", lw=1, ls="--"))
-    ax.set_title(f"{name}\nrow = dilution (rep1: rows 1-3, rep2: rows 4-6), "
-                 f"col = strain (1 = control); red = background")
+    ax.set_title(f"{name}\nAmber dashed: boundary; cyan: measured interior; "
+                 "orange: unsuitable; red dashed: background")
     ax.axis("off")
     fig.tight_layout()
     return fig
@@ -2479,6 +2592,20 @@ def flag_outliers(tidy: pd.DataFrame, group_keys: list[str] | None = None,
     return out
 
 
+def unavailable_growth(tidy, reason):
+    """A complete raw table with explicitly unavailable derived measurements."""
+    tidy = tidy.copy()
+    for col in ("relative_growth", "control_raw", "control_mean"):
+        tidy[col] = np.nan
+    tidy["control_ok"] = False
+    tidy["normalization_reason"] = reason
+    unsuitable = ~np.isfinite(tidy["raw_growth"]) | tidy["artifact"].astype(bool)
+    tidy["growth_quality"] = np.where(
+        unsuitable, "measurement_unavailable",
+        np.where(tidy["raw_growth"] <= MIN_CONTROL_GRAY, "low_growth", ""))
+    return tidy
+
+
 def add_relative_growth(tidy: pd.DataFrame, control_col: int = 1,
                         group_keys: list[str] | None = None,
                         min_control: float | None = None) -> pd.DataFrame:
@@ -2538,6 +2665,7 @@ def add_relative_growth(tidy: pd.DataFrame, control_col: int = 1,
     # board. Flagged spots are still measured and still reported; they just do
     # not get to set the scale.
     ctrl_rows = tidy.loc[is_ctrl]
+    ctrl_rows = ctrl_rows.loc[np.isfinite(ctrl_rows["raw_growth"])]
     for col in ("artifact", "excluded"):
         if col in ctrl_rows.columns:
             ctrl_rows = ctrl_rows.loc[~ctrl_rows[col].astype(bool)]
@@ -2598,8 +2726,8 @@ def add_relative_growth(tidy: pd.DataFrame, control_col: int = 1,
     # has a control near zero -- so refuse to divide and mark the rows instead.
     floor = MIN_CONTROL_GRAY if min_control is None else float(min_control)
     is_ctrl = tidy["strain_col"] == control_col
-    bad_ctrl = tidy["control_raw"] <= floor
-    bad_mean = tidy["control_mean"] <= floor
+    bad_ctrl = ~np.isfinite(tidy["control_raw"]) | (tidy["control_raw"] <= floor)
+    bad_mean = bad_ctrl
 
     with np.errstate(divide="ignore", invalid="ignore"):
         # controls included -- one divisor for the whole plate
@@ -2607,14 +2735,25 @@ def add_relative_growth(tidy: pd.DataFrame, control_col: int = 1,
     tidy["relative_growth"] = np.where(np.where(is_ctrl, bad_mean, bad_ctrl),
                                        np.nan, rel)
     tidy["control_ok"] = ~np.where(is_ctrl, bad_mean, bad_ctrl)
+    tidy["normalization_reason"] = np.where(
+        ~np.isfinite(tidy["control_raw"]), "no_usable_control",
+        np.where(bad_ctrl, "control_at_or_below_noise_floor", ""))
+    unsuitable = ~np.isfinite(tidy["raw_growth"])
+    if "artifact" in tidy:
+        unsuitable |= tidy["artifact"].astype(bool)
+    tidy.loc[unsuitable, "relative_growth"] = np.nan
+    tidy.loc[unsuitable, "normalization_reason"] = "unsuitable_measurement_roi"
+    tidy["growth_quality"] = np.where(
+        unsuitable, "measurement_unavailable",
+        np.where(tidy["raw_growth"] <= MIN_CONTROL_GRAY, "low_growth", ""))
 
     n_bad = int((~tidy["control_ok"]).sum())
     if n_bad:
         groups = (tidy.loc[~tidy["control_ok"], keys + ["replicate"]]
                   .drop_duplicates().astype(str).agg(" / ".join, axis=1).tolist())
-        print(f"  ! {n_bad} row(s) could not be normalized: the control spot "
-              f"measured <= {floor:.2f} gray above agar, which is at this "
-              f"plate's noise level, so the ratio would be noise over noise. "
+        print(f"  ! {n_bad} row(s) could not be normalized: no usable finite control "
+              f"mean above {floor:.2f} gray was available on the plate. "
+              f"See normalization_reason and ROI quality for the cause. "
               f"relative_growth is NaN for these; pick a less dilute row "
               f"(protocol step 20). Affected:")
         for g in groups[:6]:
@@ -2880,6 +3019,7 @@ def detect_for_measure(path: Path, opts: MeasureOptions,
     """
     from skimage.transform import resize
 
+    settings = opts.roi_settings  # validate before doing expensive work
     img8 = load_gray8(path, rgb_mode=opts.rgb_mode)
     if opts.rois is not None:
         grid, bg_centers = load_roi_csv(opts.rois)
@@ -2889,6 +3029,11 @@ def detect_for_measure(path: Path, opts: MeasureOptions,
                            n_rows=rows, n_cols=cols)
         bg_centers = background_gap_centers(grid)
 
+    from spotting_roi import INTERIOR_METHOD, detect_boundaries
+    if settings.method == INTERIOR_METHOD:
+        grid.boundary_radii, grid.boundary_quality = detect_boundaries(
+            img8, grid.centers, grid.base_radius or grid.measure_radius)
+    img8.setflags(write=False)  # immutable scientific source; displays own copies
     small, ds = None, 1
     if opts.rois is None:
         ds = max(1, round(max(img8.shape) / DETECT_LONG_SIDE))
@@ -2922,12 +3067,15 @@ def analyze_image_multi(path: Path, opts: MeasureOptions, row_sets: list,
     small, ds = detection["small"], detection["ds"]
 
     if proc is not None:
+        if (not isinstance(proc, np.ndarray) or proc.shape != detection["img8"].shape
+                or not np.issubdtype(proc.dtype, np.floating)):
+            raise ValueError("Scientific preprocessing requires a full-resolution floating array; previews are not measurement input")
         # Subtraction supplied by the caller: the same array this function
         # would have produced, obtained from a Python batch. `spread` is a
         # property of that image, so it is recomputed here rather than passed
         # in -- max minus min of the agar disc means, exactly as
         # subtract_background does.
-        n_iter = opts.bg_iters
+        n_iter = 0 if opts.bg_mode == "none" else opts.bg_iters
         samples = [_disk_mean(proc, cy, cx,
                               grid.base_radius or grid.measure_radius)
                    for cy, cx in bg_centers]
@@ -2958,6 +3106,8 @@ def analyze_image_multi(path: Path, opts: MeasureOptions, row_sets: list,
                 small, g.centers / ds, g.measure_radius / ds,
                 g.plate_center[1] / ds, g.plate_center[0] / ds,
                 g.plate_radius / ds)
+        from spotting_roi import configure_interior
+        configure_interior(g, opts.roi_settings, rows)
         out[tuple(rows)] = (g, measure_plate(proc, g, bg_centers))
     return out
 
@@ -2973,6 +3123,21 @@ def analyze_image(path: Path, opts: MeasureOptions, label: str = "",
     Returns (processed_image, grid, bg_centers, measurement, n_iters, spread,
     ball_radius).
     """
+    from spotting_roi import INTERIOR_METHOD
+    if opts.roi_settings.method == INTERIOR_METHOD:
+        det = detect_for_measure(path, opts, debug=debug)
+        if opts.bg_mode == "none":
+            proc = det["img8"].astype(float)
+        else:
+            proc, _, _ = subtract_background(
+                det["img8"], ball_radius=det["ball_radius"],
+                bg_centers=det["bg_centers"], bg_radius=det["grid"].measure_radius,
+                iters=opts.bg_iters, shrink=opts.shrink, mode=opts.bg_mode, debug=debug)
+        rows = tuple(opts.quant_rows or ())
+        result = analyze_image_multi(path, opts, [rows], detection=det, proc=proc)
+        grid, meas = result[rows]
+        bg, n_iter, spread, ball = result["_shared"]
+        return proc, grid, bg, meas, n_iter, spread, ball
     img8 = load_gray8(path, rgb_mode=opts.rgb_mode)
 
     if opts.rois is not None:
@@ -3056,6 +3221,18 @@ def process_root(root: Path, out_stub: str, debug: bool, no_prompt: bool,
         print(f"\n[+] {label}")
         proc, grid, bg_centers, meas, n_iter, spread, ball_r = analyze_image(
             path, opts, label=label, debug=debug)
+        provenance = root / f"{out_stub}_measurements"
+        provenance.mkdir(exist_ok=True)
+        import hashlib
+        name = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:16]
+        payload = dict(centers=grid.centers, roi_boxes=meas.roi_boxes,
+            raw=meas.raw, net=meas.net, pixels=meas.n_px, quality=meas.quality,
+            background=meas.bg_samples, settings=json.dumps(opts.roi_settings.to_dict()),
+            source=str(path.resolve()), rgb_mode=opts.rgb_mode, bg_mode=opts.bg_mode,
+            ball_radius=ball_r, bg_iters=opts.bg_iters)
+        if grid.boundary_radii is not None:
+            payload["boundary_radii"] = grid.boundary_radii
+        np.savez_compressed(provenance / f"{name}.npz", **payload)
         r1, r2 = choose_rows(proc, grid, meas.net, label, no_prompt, bg_centers)
 
         plate_results.append(PlateResult(
@@ -3069,6 +3246,10 @@ def process_root(root: Path, out_stub: str, debug: bool, no_prompt: bool,
                     "strain_col": col + 1, "strain": strain_names[col],
                     "raw_growth": meas.net[row, col],
                     "artifact": bool(meas.rim_flag[row, col]),
+                    "measurement_method": opts.roi_method,
+                    "inward_margin": opts.inward_margin,
+                    "roi_quality": meas.quality[row, col],
+                    "roi_pixels": meas.n_px[row, col],
                 })
         n_neg = int((meas.net < 0).sum())
         print(f"    background={meas.bg_mean:.1f} (mean of {N_BG_SAMPLES}, "
@@ -3246,7 +3427,12 @@ def main(argv=None):
                    help="Write auto-detected ROIs as STEM.csv + STEM.ijm and exit. "
                         "ROOT must be a single image file.")
     g.add_argument("--measure-diameter", type=float, metavar="PX",
-                   help="Force the measuring ROI diameter (px).")
+                   help="Nominal ROI diameter cap before inward margin (px); exact diameter with the legacy method.")
+    g.add_argument("--inward-margin", type=float, default=0.15,
+                   help="Fraction of safe spot radius to exclude (default 0.15).")
+    g.add_argument("--roi-method", choices=("centered-interior-v1", "fixed-oval-v23"),
+                   default="centered-interior-v1")
+    g.add_argument("--min-interior-pixels", type=int, default=25)
     g.add_argument("--ball-radius", type=float, metavar="PX",
                    help="Rolling-ball radius (px), verbatim as typed into ImageJ's "
                         "Subtract Background dialog. Overrides the derived value.")
@@ -3289,6 +3475,8 @@ def main(argv=None):
 
     opts = MeasureOptions(
         rois=args.rois, measure_diameter=args.measure_diameter,
+        roi_method=args.roi_method, inward_margin=args.inward_margin,
+        min_interior_pixels=args.min_interior_pixels,
         ball_radius=args.ball_radius, bg_mode=args.bg_mode,
         bg_iters=args.bg_iters, shrink=args.shrink, rgb_mode=args.rgb_mode)
 
@@ -3297,10 +3485,12 @@ def main(argv=None):
             print(f"--export-rois needs a single image file, got: {args.root}",
                   file=sys.stderr)
             return 2
-        img8 = load_gray8(args.root, rgb_mode=opts.rgb_mode)
-        grid = detect_grid(img8, debug=args.debug)
+        det = detect_for_measure(args.root, opts, debug=args.debug)
+        grid = det["grid"]
         if opts.measure_diameter is not None:
             grid.measure_radius = opts.measure_diameter / 2.0
+        from spotting_roi import configure_interior
+        configure_interior(grid, opts.roi_settings, opts.quant_rows)
         csv_path, ijm_path = export_rois(grid, background_gap_centers(grid),
                                          args.export_rois)
         print(f"Wrote:\n  {csv_path}\n  {ijm_path}\n\n"

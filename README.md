@@ -1,4 +1,6 @@
-# Spotting Assay Quantification
+# Frogger
+
+*Spotting assay quantification.*
 
 Automated quantification of yeast serial-dilution spotting assays, from plate
 photographs to publication figures and statistics.
@@ -17,16 +19,15 @@ than applied silently.
 
 ## What is in here
 
+For supported photo layouts, inferred fields and manual recovery, see
+[Organizing photographs for experiment setup](docs/data-organization.md).
+The same guide opens from experiment **Data → Photo organization guide** and
+**Help → Photograph and folder organization**, including workbench tabs.
+
 | | |
 |---|---|
-| `run_workbench.bat` | **The program.** Every tool below in one window: plate templates, experiments (where photos are measured) and their review, as tabs, with a Home page to start from. See [One program, every stage](#one-program-every-stage). |
-| `run_plate_designer.bat` | **Plate designer.** Draw the layout of the assay: which cell holds which sample, replicate and dilution. Strain-free, so one template serves many experiments. |
-| `run_experiment_designer.bat` | **Experiment designer.** Bind a template to real strains, conditions and photographs, and drive either pipeline from it. |
-| `run_data_review.bat` | **Data review.** Before the statistics, flip through every photograph an experiment imported and flag bad plates and bad spots. See [Reviewing the data before the statistics](#reviewing-the-data-before-the-statistics). |
-| `run_spotting.bat` | **Main pipeline.** A folder of chosen photos → measurements, statistics, figures. |
-| `run_timecourse.bat` | **Selection pipeline.** A raw capture tree → which photos are worth quantifying. |
-| `run_review.bat` | **Review.** Every candidate the selection pipeline scored → the one you choose, with bad spots corrected. |
-| `spotting_app.py` | **The entry point.** Bare, it opens the workbench; with a stage name, it runs that one stage. |
+| `run_frogger.bat` | **The program.** Every tool in one window: plate templates, experiments (where photos are measured) and their review, as tabs, with a Home page to start from. See [One program, every stage](#one-program-every-stage). |
+| `spotting_app.py` | **The entry point.** Bare, it opens the workbench; with a stage name (`plate`, `experiment`, `data-review`, `spotting`, `timecourse`, `review`), it runs that one stage. |
 | `workbench/` | The workbench window: Home, tabs, the Explorer, the Jobs panel. |
 | `uikit/` | What every tool shares: the colours and fonts, the flat theme, and the host contract that lets a tool run alone or as a tab. |
 | `plate_template/` | The plate designer: model, schema, validation, autofill, and its window. |
@@ -44,11 +45,33 @@ than applied silently.
 
 ---
 
-## Requirements
+## Requirements and installation
 
-**Python 3.11+**
+**Python 3.11+** on Windows (the launcher is a `.bat` file; the Python code itself is
+cross-platform).
+
+**Windows, no command line needed:**
+
+1. If you don't have Python yet, install Python 3.11 or newer from
+   [python.org](https://www.python.org/downloads/windows/) and tick **"Add python.exe to PATH"**.
+   An existing Anaconda/Miniconda install also works.
+2. Download this repository (green **Code** button → **Download ZIP**, then unzip it) or `git clone` it.
+3. Double-click **`run_frogger.bat`**.
+
+The first launch takes a few minutes. It creates a private Python environment in
+`%USERPROFILE%\.python-envs\yeast-spotting-quantification` and installs `requirements.txt` there, without touching
+your other Python installs. Later launches start straight away, and the environment updates
+itself whenever `requirements.txt` changes. To start over, delete that folder.
+
+> If Windows shows *"Windows protected your PC"* for a downloaded ZIP, click **More info → Run
+> anyway**, or right-click the ZIP → **Properties → Unblock** before unzipping.
+
+If you already have a conda environment named `spotting`, the launchers use it as is
+instead. To set one up by hand:
 
 ```
+conda create -n spotting --override-channels -c conda-forge python=3.13
+conda activate spotting
 pip install -r requirements.txt
 ```
 
@@ -75,28 +98,64 @@ and who is in which column has to be typed in at a console prompt every time.
 The **experiment designer** removes both constraints.
 
 ```
-run_experiment_designer.bat
+py spotting_app.py experiment
 ```
 
 An *experiment* contains one or more strain groups using the same plate template,
 spotted across treatments. Each group has its own strains and positive control.
 
-Start on **Panel** to import and preview the plate template, name the sample
-slots, and mark the positive control. Leave a slot blank if nothing was spotted
-there. Then open **Data** and choose the experiment's photo folder. The designer scans
+Start on **Panel** with **Create layout...**, or **Copy from template...** to
+start with a reusable design. The layout editor has the same drawing tools,
+presets and undo as the standalone plate designer. Press **Use layout in
+experiment** to return directly to setup; no intermediate template file is
+required. **Edit layout...** edits a separate draft; Cancel discards the draft,
+and applying it is one experiment undo step. Name the sample slots and leave a
+slot blank if nothing was spotted there. Choose normalization and separate
+statistical references on the final **Analysis / comparisons** tab.
+
+Experiments embed their own layout snapshot (schema v6). Template identity and
+path record its source, while the embedded geometry is authoritative for setup,
+data review and analysis. Editing, moving or deleting the original template
+does not change a saved experiment. An older experiment with only a file
+reference copies the template on its first successful load and embeds it on
+its next save; a missing legacy source must still be restored or explicitly
+replaced. Layout edits preserve strain names, assignments and scientific
+settings; incompatible slots or plate picks remain visible to validation.
+
+When finishing setup, **Save reusable plate template... (optional)** on the
+final tab (also in File) exports a separate reusable copy. Saving or running
+the experiment requires no template export. The standalone plate designer
+also offers **Use layout in experiment** to open a new workbench experiment
+from its current, possibly unsaved drawing. Its normal template saving and
+editing remain available.
+
+Then open **Data** and choose the experiment's photo folder. The designer scans
 the names, suggests treatments, and adds them to
 **Conditions** for review. No photos are moved or renamed, and the scan does
 not read image pixels. Suggestions remain available when plate numbers or
 elapsed hours are still unknown.
 
 Review and edit the suggested treatment names in **Conditions**, then return to
-**Data** to specify the organization. Each photo shows its relative path,
-suggested treatment, plate, elapsed hours, set, and missing information. You can
-choose where each detail is written, check the examples, and press **Use these
-choices**, or select several
-photos and assign a condition, plate, hours or set together. **Ignore** excludes
-unwanted photos. **Add strain group** defines another panel in the same folder.
-Use **Add detected conditions** after changing rules or correcting photos.
+**Data**. Each photo shows its relative path, suggested treatment, plate,
+elapsed hours, set, and missing information. **Data** identifies photos in
+three steps, each of which wins over the one before it:
+
+1. **Read from folder and file names automatically.** Nothing to do; **Detect
+   again** regenerates this reading.
+2. **Keyword rules.** *Photos whose folder or file name contains `Gluc` are
+   treatment Glucose*; *… contains `IMG_9` are plate 1*; *… contains `day2`
+   are 48 hours*; *… contains `setB` are strain group B*. Click **Keyword
+   rules...**, then **Add rule...**, type the text, choose what it means, and
+   watch the live count of matching photos. Matching ignores case and position in the path; if two
+   keywords for the same detail both match, the longer one wins, so `Glucose +
+   H2O2` beats `Glucose` without ordering anything.
+3. **By hand.** Select photos in the list and press **Treatment**, **Plate**,
+   **Hours** or **Strain group**. A photo list assigned entirely by hand is
+   enough to run; no rule is required.
+
+**Ignore** excludes unwanted photos. **Add strain group** defines another panel
+in the same folder. Use **Add detected conditions** after changing rules or
+correcting photos.
 
 For multiple panels, choose **Multiple strain groups - assign photos below**
 and apply, or click **Add strain group**. Name the existing and additional
@@ -110,13 +169,26 @@ by experiment/group name and uses their saved photo assignments and controls;
 groups are never pooled. Version-1 experiment files still open; new files use
 version 2 so older designers cannot silently ignore their strain groups.
 
-Each detail has one dropdown combining where to look and how to read the name,
-for example, “Read hours from the ‘16 Hours, 18 Hours’ folders.” Choices include
-names from your own data and show the values they would read before you apply them.
-Common name formats such as `Plate 1`, `16 Hours`, and `R1` can be selected
-without writing a pattern. `R1` is treated as a plate number only when you
-explicitly choose that interpretation. The **advanced pattern editor** is
-optional and hidden by default.
+**Photos in a fixed order.** Some benches photograph several strain sets at once
+and keep every photo of one medium, time and treatment in one folder, always in
+the same order. For example: set A plate 1 (replicates 1+2), set A plate 2
+(replicates 3+4), set B plate 1, and so on. On **Data**, click **Photo order in
+each folder...**, list the strain groups and plates in the order they were
+photographed (add groups there too), and check the table against one of your
+folders. Each photo's strain group and plate then come from its position in its
+folder, counted in filename order as Explorer lists it. Photos marked **Ignore**
+are skipped when counting. The same order applies to folders added later. A
+folder with more or fewer photos than the order lists is not guessed at: its
+photos are marked in the table. Ignore the extra shot, or assign those photos by
+hand. Hand corrections always win over the order.
+
+**Advanced: choose where each detail is written...** opens the underlying
+reading rules for people who want to change step 1 itself rather than add
+keywords. Each detail has one dropdown combining where to look and how to read
+the name, for example, “Read hours from the ‘16 Hours, 18 Hours’ folders.”
+Choices include names from your own data and show the values they would read
+before you apply them. The regex **pattern editor** inside it is optional and
+hidden by default; ordinary setup never needs either.
 
 **Re-read** preserves your naming rules and corrections. **Detect organization**
 explicitly regenerates the rules, retaining manual photo corrections and code
@@ -247,7 +319,7 @@ doing that up front: flip through every photograph an experiment imported,
 before anything is tested, and flag what is not good data.
 
 ```
-run_data_review.bat "Experiment Designs\Set09.spotexp.json"
+py spotting_app.py data-review "Experiment Designs\Set09.spotexp.json"
 ```
 
 In the workbench it is step 3 on Home, or **Review data...** on the experiment
@@ -323,7 +395,7 @@ are:
 Then:
 
 ```
-run_spotting.bat
+py spotting_app.py spotting
 ```
 
 The first run asks, per set, for the eight strain names and which column is the
@@ -390,9 +462,9 @@ Set09/
 ```
 
 ```
-run_timecourse.bat                            # folder picker opens
-run_timecourse.bat "D:\Set09" --estimate      # how much work it is
-run_timecourse.bat "D:\Set09"                 # score everything
+py spotting_app.py timecourse                  # folder picker opens
+py spotting_app.py timecourse "D:\Set09" --estimate  # how much work it is
+py spotting_app.py timecourse "D:\Set09"      # score everything
 ```
 
 **Several sets at once.** Run it with no argument and a multi-select folder
@@ -495,10 +567,10 @@ you look at all of them, keep that winner or choose a different one, and correct
 individual spots:
 
 ```
-run_review.bat                                # reopens the set you had open last
-run_review.bat --pick                         # choose a different set
-run_review.bat "Results\Timecourse\Set01"     # straight into one set
-run_review.bat --apply                        # re-export every reviewed set, no window
+py spotting_app.py review                      # reopens the set you had open last
+py spotting_app.py review --pick               # choose a different set
+py spotting_app.py review "Results\Timecourse\Set01"  # straight into one set
+py spotting_app.py review --apply              # re-export every reviewed set, no window
 ```
 
 Double-clicking goes straight back to where you left off — reviewing a set takes
@@ -526,6 +598,14 @@ end — highest score, but *lowest* spread.
 
 Inside the spot table the arrows still move between spots, and inside a text box
 they still move the cursor.
+
+The candidate list has keyboard focus when review opens. You can also Tab to
+the image or click it to browse from there. Each Up/Down key event moves one
+candidate, including when a key repeats. Navigation stops at the first or last
+row; Page Up/Down moves up to ten rows and stops at the boundary. Sorting and
+refreshing keep the preview highlighted. Browsing never changes the export
+pick until you choose the candidate. Spinboxes, sliders, and other editing
+controls keep their own arrow keys.
 
 ### Correcting spots
 
@@ -599,10 +679,20 @@ window is open show up on the next refresh.
 
 ### What a review writes
 
+**Results → Save Results**, **Save Results As…**, and **Open Results…** are
+available in standalone review and workbench tabs, directly from a result folder
+without Jobs. Save As creates a new folder and independent UUID, then switches
+to that run. Each run owns its experiment/layout/configuration snapshot, raw
+measurements and ROI geometry, review/inclusion/comparison decisions, and display
+settings. Upstream experiment/data-review edits do not change saved runs.
+Missing/changed originals are reported; **Relink Original Images…** verifies
+recorded hashes. Legacy result folders still open. See [saved-run format and
+figure/montage extension contract](docs/result-runs.md) for details and limits.
+
 Decisions go to `Results/Timecourse/<set>/review.json` — which candidate per
-medium, and what changed about which spot, with your reasons. Numbers are never
-stored there; they are rebuilt from the photographs through the same functions
-the pipeline uses, so a review still means something after a re-measure.
+medium, and what changed about which spot, with your reasons. Raw measurements
+and geometry live separately in `measurements/`; reviewed derived CSVs live in
+`review_measurements/`. Recalculation uses the same scientific pipeline functions.
 
 **Export…** lets you select outputs, treatments, and a destination folder
 (default: `Results/Timecourse/<set>/chosen/`). Click **PowerPoint only** for just
@@ -616,6 +706,16 @@ outlier flags, laid out the way the review is showing sheets (Fit or Aligned,
 rotated or not). Merely previewing another candidate does not change the
 export. Photo filenames and analysis settings are recorded in speaker notes.
 Rebuilding and exporting run in the background.
+
+Photograph coordinates use the pixels stored in the file, without applying
+EXIF rotation or mirroring. This keeps existing measurements and ROI overlays
+aligned. Set **Photo orientation** in experiment setup to interpret a camera
+turn; it maps the plate labels to the photograph without editing the source.
+Fit may arrange panels side by side or stacked, but resizing the review or
+exporting a slide never automatically turns a photograph. The review's Rotate
+option changes the graph orientation (and the aligned replicate strips), as
+shown in the preview. PowerPoint embeds those pixels without orientation
+metadata, so a presentation viewer cannot apply another EXIF turn.
 
 | file | contents |
 |---|---|
@@ -761,7 +861,7 @@ Known limits, stated plainly:
 
 ## One program, every stage
 
-`run_workbench.bat` (or `py spotting_app.py`, bare) opens the **workbench**: the
+`run_frogger.bat` (or `py spotting_app.py`, bare) opens the **workbench**: the
 plate designer, the experiment designer and the review window in one window,
 each open file a tab.
 
@@ -779,11 +879,48 @@ each open file a tab.
   line marks where it will land. You can also right-click a tab and choose
   **Move left** or **Move right**. Home stays first. Saved files reopen in your
   chosen order next time.
+- **The guided tour** starts by itself the first time the program opens: a
+  callout beside each part of Home, with **Back** and **Next**. It ends by
+  offering the **practice run**: one whole assay, done once, on eight real
+  photographs that ship with the program. You draw the plate layout, name the
+  strains, link the photographs, add a category, choose the reference strain,
+  run it, look through the results, flag an outlier and make a figure. Each
+  step waits until you have done it, and **Do it for me** does it for you.
+  Run opens results measured ahead of time, so nothing has to be waited for.
+  The practice works on copies (`Practice/` and a result set named
+  *Practice run*), which can be deleted at any time.
+  Each tool (plate template, experiment, review) also has a reference tour of
+  every control, shown the first time it is opened outside the practice.
+  **Help → Take the guided tour** starts it all again, **Help → Practice run**
+  starts the practice alone, and **Help → Tour of this tab** replays one
+  tool's. **Skip all tours** stops them until then. The practice data lives
+  in `workbench/practice/` and is rebuilt with
+  `py -m workbench.practice_build --source <capture tree>`.
 - **Runs** started from an experiment's Run tab no longer open a console: they
   run in the background, listed in the **Jobs** panel under the Explorer with a
   progress bar. Click one for its log, live. When it ends, a notice in the
   corner offers **Open in Review**. Stop ends the run and its worker processes.
   Logs are kept in `.workbench/logs/`.
+  Rows and log tabs show **Queued**, **Running** with the current output stage,
+  **Completed**, **Failed**, or **Cancelled**. A numeric bar uses the latest
+  measured `done/total` counter for that stage; a running stage without a count
+  uses an indeterminate bar. Counts can change as work is discovered. Completion
+  means a successful process exit, not that an earlier stage reached its total.
+
+The experiment Panel preview prints slot numbers on occupied spots, using
+contrasting ink while retaining the spot colour and dilution shading. Dense
+layouts scroll rather than shrinking the labels below readable size. The plate
+editor retains its slot labels on the least dilute spot of each series and its
+separate replicate labels; full token view remains available.
+
+In **Conditions**, Ctrl-click toggles individual rows and Shift-click selects a
+range from the last ordinary click. **Remove** confirms exactly the selected
+conditions. Conditions are shared across strain groups: removal clears their
+group settings, picks and final-analysis references in every group. Linked photo
+condition assignments are cleared explicitly so they cannot be inferred as the
+sole surviving treatment. Photos remain in **Data** for reassignment, and original
+photo files are preserved. One Undo restores the entire batch, including linked
+assignments. Select one condition to rename inline (F2) or edit excluded slots.
 
 The single-tool `.bat` files still work — each tool also runs on its own, which
 is how it is developed and tested. So do the console pipelines, for scripting:
@@ -801,8 +938,7 @@ py spotting_app.py --help
 Stages are `workbench`, `plate`, `experiment`, `data-review`, `review`, and the
 console pipelines `spotting` and `timecourse`. The command-line tools behind them
 are `plate-cli`, `experiment-cli`, `data-review-cli`, `montage`, `pptx` and `quant`. Dragging
-capture-tree folders onto the file runs the time course on them, as it does for
-`run_timecourse.bat`.
+capture-tree folders onto the file runs the time course on them.
 
 `--selftest` imports every stage and exercises the fragile parts — compiled
 Numba code, every figure format, the slide template, Tk, the workbench window —
@@ -848,13 +984,8 @@ it enabled before publishing, whichever route you take.
 ```
 .
 ├── spotting_app.py             entry point: the workbench, or one stage by name
-├── run_workbench.bat           the program: every tool in one window
-├── run_plate_designer.bat      plate designer launcher
-├── run_experiment_designer.bat experiment designer launcher
-├── run_data_review.bat         data review launcher
-├── run_spotting.bat            main pipeline launcher
-├── run_timecourse.bat          selection pipeline launcher
-├── run_review.bat              review window launcher
+├── run_frogger.bat             the program: every tool in one window
+├── setup_env.bat               finds or builds the Python the launcher uses
 ├── workbench/                  the one-window program
 │   ├── shell.py                the main window: tabs, menus, shortcuts, closing
 │   ├── home.py                 Home, the task manager
@@ -912,9 +1043,200 @@ import `src/`.
 
 ---
 
+## Interior measurement ROIs and image integrity
+
+New analyses use `centered-interior-v1`. In Results Review, choose
+**Measurement ROI…**, set **Inward margin (%)** and **Minimum interior pixels**,
+then press **Recalculate with interior ROI**. The default margin is 15% of the
+safe detected radius; it is a scientific setting, not a display zoom. The
+current candidate recalculates from its original photos; other conditions and
+candidates use the same settings when opened. **Save review** (Ctrl+S) records
+the method and margin. The current graph redraws after recalculation;
+**Recompute data** (Ctrl+R) redraws other stale graphs. Historical candidate ranking scores are not reranked
+by this action. Export rebuilds the selected data with the saved ROI settings.
+
+**Review ROI overlays…** opens the original photographs with the detected edge
+in dashed amber and the actual measurement circle in cyan. Orange circles have
+an unsuitable interior; point at a spot for its reason and measured value. The
+photo-review window and magnifier also show both geometries. Coordinates always
+refer to the stored photo raster, as described above; changing ROI margin never
+moves a detected center or applies EXIF rotation. Legacy results remain
+`fixed-oval-v23` until the explicit interior recalculation action. Opening an old
+result does not silently upgrade its measurements.
+
+The new boundary search uses a local agar plane and supported radial intervals,
+rejects isolated outer bright speckles, and bridges short internal gaps between
+microcolonies. It deliberately flags unresolved or markedly irregular edges.
+Within a dilution choice, the same centered circular radius is used for all
+strains, including controls, and for agar background samples. Extreme small
+spots do not shrink the whole plate: spots that cannot contain the shared
+interior circle are flagged `insufficient_interior`. Pixel counts are recorded;
+subpixel centers can give slightly different discrete counts even with identical
+continuous radii. The measured quantity is **mean grey**, not integrated signal,
+so no multiplication by ROI area enters normalization. Diagnostic raw and net
+values (including low and negative values) remain in the table/CSV; flagged
+measurements do not supply a normalization control or enter summary statistics.
+Sparse growth may have no certifiable continuous interior: review the photograph
+and the reason, rather than treating an unresolved edge as proof of no growth.
+
+The measurement cache records settings, exact bounding boxes, 72-ray boundaries,
+pixel counts, quality reasons, raw/net readings, background samples, and
+scientific preprocessing. Exported data carry method, margin, geometry and
+quality columns. Saving a recalculated review also writes its loaded chosen
+frames to `review_measurements/` beside `review.json`. New experiment runs record
+settings in `experiment.json`; console time-course runs record `measurement.json`.
+Single-image ROI export preserves floating geometry and writes a method sidecar.
+The console quantifier/batch driver also accepts `--inward-margin 0.20` (a fraction,
+unlike the GUI's percent). The quantifier offers `--roi-method fixed-oval-v23` for
+explicit historical comparisons.
+
+Brightness, contrast, fit, rotation, and aligned-view controls operate only on
+detached display copies. Quantification reloads original full-resolution stored
+pixels; its source array is read-only. Neither the preview cache nor montage
+rendering supplies measurement pixels. Generated sheets, montages and marked
+presentation exports are rejected as measurement inputs. An externally edited,
+unmarked photo cannot be recognized automatically as a derived image. Keep the
+original photos as the source references. RGB-to-grey conversion and the
+ImageJ-compatible sliding-paraboloid subtraction are intentional scientific
+preprocessing; they are recorded separately from display adjustment and do not
+rewrite photographs. This interior method is a versioned extension of the
+historical protocol, not a claim of new hand-ImageJ calibration.
+
+Task 13 acceptance artifacts, real-photo hashes, and limitations are documented
+in `orchestration/handoffs/task-13.md`; reviewable overlays are under
+`validation/task13/`.
+
+## Reviewing low growth and inclusion decisions
+
+Time-course scoring retains every candidate even when the control is too dim,
+no suitable control remains, or a positive-growth CV cannot be calculated.
+The candidate list's **Quality** column and the selected candidate's explanation
+show these reasons. Ranking remains a suggestion; any retained candidate can
+be selected with **Use this candidate**. A missing score is unavailable, not zero.
+
+**Include treatment in exports** controls an explicit treatment decision.
+Uncheck it to omit that treatment from exports while keeping all its candidates
+and measurements visible in review. **Save review** (Ctrl+S) persists the choice,
+and undo/redo restores it. The Export dialog starts with the saved inclusion
+choices; exporting saves any changes to its treatment selection. The review CLI
+also honours saved choices. Undecided treatments are included by default.
+
+The per-spot table and CSV retain signed background-subtracted `raw_growth`,
+including low and negative values. `growth_quality=low_growth` is a signal flag,
+not an automatic condition exclusion or a failed-ROI verdict. `roi_quality`
+continues to record the interior method's geometry checks. Failed measurement
+cells have null raw values and a `measurement_error`; successful measurements
+from other plates remain available. `normalization_reason` explains unavailable
+ratios: a missing/nonfinite/too-dim control, unsuitable measurement ROI, or a
+user exclusion. Such ratios stay null; invalid ROIs cannot set the denominator
+or contribute to accepted statistics. Selecting a row displays its full reasons
+below the table. All measurement geometry and provenance columns survive export.
+
+Graphs and PowerPoint retain a readable treatment with no valid ratios using
+an explanatory panel instead of invented bars or statistical results. Summary
+rows with no usable observations show n=0 and unavailable mean/SD/p; a single
+observation has unavailable SD. Existing statistical detection-floor rules
+continue to apply to valid low-growth observations; raw values and measured
+ratios are not clipped. An unreadable source image can still prevent its montage
+or PowerPoint from being built; the export reports the failure explicitly while
+retaining the CSV and other successful outputs. Existing output files outside
+the requested export are preserved, so use a fresh folder for a standalone
+package containing only the current treatment selection.
+
+Older runs whose candidate CSV already omitted conditions need the selection
+pipeline rerun to discover those missing candidates. Merely opening a historical
+CSV cannot recover records it never contained. Original photographs and existing
+result folders are never rewritten by opening a review.
+
+Task 1 acceptance commands, artifacts and limitations are recorded in
+`orchestration/handoffs/task-01.md`.
+
+## Final normalization and comparisons
+
+Plate design and the initial Panel tab do not require a default control. In
+**Analysis / comparisons**, select each group's normalization reference (the
+divisor on each plate), then select its statistical comparison references
+independently. Both handpicked and time-course runs require valid normalization
+before calculations. A condition inherits the group default until explicitly
+overridden; the two inheritance reset buttons operate independently.
+
+WT/EV suggestions match whole tokens separated by punctuation or whitespace,
+case-insensitively by default: `WT BY` and `EV-BY` match, `SWT`, `WT2` and
+`DEV1` do not. Edit the tokens/case setting or select any strain manually.
+The preview lists every requested pair once, omitting self-comparisons and
+excluded strains. Apply commits the proposal; groups need no WT/EV names.
+
+Saved experiments migrate legacy controls and condition overrides into schema
+v5 final choices. Current unconfigured experiments stay unconfigured on reopen
+and undo. Review uses the same editor; changes invalidate cached tables and
+graphs and rebuild from the recorded raw measurement method. Raw signed growth,
+ROI geometry and source provenance remain available. Old candidate scores are
+marked invalid and hidden after reference changes; rerun selection to obtain a
+new ranking. Chosen candidates remain your decisions.
+
+Exports record `final_analysis.json` and regenerate statistics from the selected
+references. Saved review measurement CSVs belong to the decisions listed in
+`review_measurements/manifest.json`; unlisted files are historical. Optional
+multi-step analysis uses the same requested pairs with Holm correction across
+all estimable tests within each condition, retaining raw normalization markers
+and recording each comparison reference separately. Its timestamped outputs
+remain historical when a review changes; rerun that analysis for new results.
+
+Task 3 commands, acceptance artifacts and limits are recorded in
+`orchestration/handoffs/task-03.md`.
+
+## Review image loading
+
+Review sheets load in the background with a visible loading message. The two
+nearest candidates in the displayed order are prefetched after the current sheet
+loads. Decoded photos, fitted views and Tk images use separate byte-bounded caches
+(96/32/32 MiB per review pane); at most two image jobs run at once. A large visible
+image and active processing need additional memory; images above 90 megapixels
+are rejected with an explanation. Changing the source file, view, size, tone,
+rotation, relinking or opening another run cannot publish an outdated request.
+These are display caches: original-source SHA256 checks, archived raw measurements,
+ROI calculations, publication figures and exports retain their existing behavior.
+
 ## Licence
 
 MIT — see `LICENSE`.
 
 The measurement method is that of Petropavlovskiy et al., *STAR Protocols*
 **1**:100182 (2020); please cite the paper if you use this for published work.
+
+
+### Rename and action shortcuts
+
+In standalone windows and workbench tabs, **F2** edits the selected treatment
+on the experiment Conditions tab. The Rename button and double-clicking its
+label open the same inline field: **Enter** commits, **Escape** or leaving the
+field cancels. Elsewhere in experiment setup F2 renames the experiment. In the
+plate designer F2 renames the active plate. In results review F2 edits the
+active treatment; click or Tab to the result title and press F2 to rename the
+result. Results menus and Explorer's **Rename display name** offer these actions.
+
+**Ctrl+Shift+S** invokes the active tool's **Save As**, including while typing.
+It also saves a reusable template from a detached layout draft. Data review
+has no Save As action.
+**Ctrl+S** saves; **Ctrl+Z/Ctrl+Y** undo/redo document actions outside editing
+controls. Inline edits retain ordinary cursor, text and cancellation keys.
+
+Plate-design shortcuts (outside editing fields), also shown in the **Plate**
+menu and toolbar tooltips:
+
+| Keys | Action |
+| --- | --- |
+| Ctrl+Alt+S / R / D | Increase first slot / replicate / dilution, using the spinbox action |
+| Ctrl+Alt+1 / 2 / 3 / 4 | Place samples / add dilutions / mark empty / erase |
+| Ctrl+Alt+G | Grid size |
+| Ctrl+Alt+N / C / X | Add / duplicate / delete plate (existing dialogs/safeguards apply) |
+| Ctrl+T | Toggle tokens |
+
+**Help > Keyboard shortcuts** lists these bindings. Document shortcuts route
+only to the active workbench tab. Rename labels preserve condition codes,
+experiment IDs, photo assignments and candidate/source keys. Result labels
+persist in `review.presentation.names`; new export CSV/graph/montage labels and
+PowerPoint notes use them. Existing sheet/graph pixels,
+raw measurement experiment names, source provenance, result UUIDs, scientific
+labels and historical artifact/deck paths retain their recorded identity.
+Use Redraw or a new export to generate graphics with current labels.

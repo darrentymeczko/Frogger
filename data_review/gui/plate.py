@@ -7,9 +7,9 @@ beside it shows whichever spot the pointer is on, with its neighbours, from the
 full-resolution pixels.
 
 Pixels are shown as the file holds them: no EXIF rotation, no contrast change.
-The engine reads the file the same way (`spotting_quant.load_gray8` opens it
-with Pillow and applies nothing), so the grid it detected lands exactly on the
-picture here.
+The engine reads the file the same way, so the grid it detected lands exactly
+on the picture here. TIFF uses tifffile in both paths: unlike JPEG, Pillow
+would otherwise automatically apply TIFF orientation metadata.
 """
 
 from __future__ import annotations
@@ -41,6 +41,23 @@ EMPTY = "#6B7785"
 RIM = "#FF9F1C"
 FLAG = "#FF3B30"
 HOVER = "#FFFFFF"
+BOUNDARY = "#FFCE54"
+
+
+def draw_boundary(canvas, found, r, c, scale, x0, y0, tags=()):
+    """The detected edge is amber/dashed; the measured circle is solid cyan."""
+    radii = found.boundary.get((r, c))
+    if radii is None:
+        return
+    import numpy as np
+    from src.spotting_roi import boundary_xy
+    points = boundary_xy(found.center(r, c), radii)
+    points = np.vstack((points, points[0]))
+    for a, b in zip(points[:-1], points[1:]):
+        if np.isfinite([a, b]).all():
+            canvas.create_line(x0+a[0]*scale, y0+a[1]*scale,
+                               x0+b[0]*scale, y0+b[1]*scale,
+                               fill=BOUNDARY, dash=(3, 2), tags=tags)
 
 #: Long edge of the quick decode the photo is drawn from.
 PREVIEW_EDGE = 2000
@@ -66,14 +83,10 @@ def open_preview(path: Path) -> Pixels:
     if not HAVE_PIL:
         raise RuntimeError("Pillow is not installed on this Python, so photos "
                            "cannot be shown")
-    with Image.open(path) as im:
-        size = im.size
-        try:
-            # JPEG decodes at 1/2, 1/4 or 1/8 for a fraction of the cost.
-            im.draft("RGB", (PREVIEW_EDGE, PREVIEW_EDGE))
-        except Exception:
-            pass
-        im.load()
+    from src.spotting_pixels import open_pixels, pixel_size
+
+    size = pixel_size(path)
+    with open_pixels(path, draft=(PREVIEW_EDGE, PREVIEW_EDGE)) as im:
         preview = im.convert("RGB")
     if max(preview.size) > PREVIEW_EDGE * 1.5:
         preview.thumbnail((PREVIEW_EDGE, PREVIEW_EDGE), Image.BILINEAR)
@@ -81,8 +94,9 @@ def open_preview(path: Path) -> Pixels:
 
 
 def open_full(path: Path):
-    with Image.open(path) as im:
-        im.load()
+    from src.spotting_pixels import open_pixels
+
+    with open_pixels(path) as im:
         return im.convert("RGB")
 
 
@@ -217,7 +231,8 @@ class PlateView(tk.Canvas):
             for c in range(cols):
                 y, x = found.center(r, c)
                 cx, cy = x0 + x * scale, y0 + y * scale
-                rad = max(3.0, found.radius.get((r, c), 0.0) * scale)
+                rad = found.radius.get((r, c), 0.0) * scale
+                draw_boundary(self, found, r, c, scale, x0, y0, "overlay")
                 cell = self.cells.get((r, c))
                 flagged = (r, c) in self.flags
                 if flagged:
@@ -242,6 +257,9 @@ class PlateView(tk.Canvas):
                                    f"{found.net.get((r, c), 0.0):.1f}", small,
                                    "#FFFFFF", "overlay")
         self._draw_hover()
+        _shadowed_text(self, x0 + dw/2, y0 + dh - 12,
+                       "Amber dashed: detected boundary | solid: measured ROI | orange: unsuitable",
+                       small, "#FFFFFF", "overlay")
 
     def _draw_hover(self) -> None:
         self.delete("hover")
@@ -331,6 +349,7 @@ class Magnifier(tk.Canvas):
                 y, x = found.center(r, c)
                 px, py = (x - box[0]) * zoom, (y - box[1]) * zoom
                 rad = found.radius.get((r, c), 0.0) * zoom
+                draw_boundary(self, found, r, c, zoom, -box[0]*zoom, -box[1]*zoom)
                 this = (r, c) == cell
                 if (r, c) in flags:
                     colour, width = FLAG, 3 if this else 2

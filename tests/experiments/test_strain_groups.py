@@ -131,7 +131,10 @@ def test_every_group_is_validated_even_when_another_is_selected(grouped):
     ctl = grouped
     ctl.select_group("A")
     ctl.experiment.strain_groups["B"].control_slot = None
-    assert any(i.is_error and "'B'" in i.message and "control" in i.message for i in ctl.issues())
+    assert any(not i.is_error and "'B'" in i.message and i.code == "no_control" for i in ctl.issues())
+    from experiments.run import to_pipeline_config
+    with pytest.raises(ValueError, match="normalization"):
+        to_pipeline_config(ctl.experiment.for_group("B"))
 
 
 def test_timecourse_splits_before_scoring_and_review_loads_each_panel(grouped, tmp_path, monkeypatch):
@@ -147,7 +150,7 @@ def test_timecourse_splits_before_scoring_and_review_loads_each_panel(grouped, t
         assert len(shots) == 2
         assert all(s.path.relative_to(Path(grouped.experiment.photo_root)).parts[0] == tree.set_hint for s in shots)
         seen.append((tree.set_hint, cfg["strains"], cfg["media"]["GLU"]["control_col"]))
-        args.out.mkdir(parents=True)
+        args.out.mkdir(parents=True, exist_ok=True)
         (args.out / discovery.CANDIDATES_CSV).write_text(
             CANDIDATES.replace("_9.JPG,_9_1.JPG", "photo.jpg,photo.jpg"), encoding="utf-8")
         return 0

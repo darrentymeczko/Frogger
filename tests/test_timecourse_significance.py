@@ -140,3 +140,38 @@ def test_a_slow_test_is_spread_over_workers(monkeypatch):
     monkeypatch.setattr(tc, "PARALLEL_TEST_S", 0.0)
     pooled = tc.significance_all(groups, TUKEY, workers=2)
     assert pooled == serial == [{}] + [{"sick": -1}] * 4 + [{}]
+
+
+@pytest.mark.parametrize("settings", [T_TEST, dict(T_TEST, p_adjust="holm"),
+                                    TUKEY, dict(TUKEY, posthoc="dunnett")])
+def test_multi_reference_consensus_preserves_opposing_effects_and_export_tests(tmp_path, settings, monkeypatch):
+    import json
+    monkeypatch.setitem(GROWTH, 2, [.5, .51, .49, .505])
+    monkeypatch.setitem(GROWTH, 3, [.7, .71, .69, .705])
+    settings = dict(settings, comparison_references=(("*", ("WT", "sick")),))
+    metrics = score(settings)
+    signals = metrics["_strain_sigs"]
+    assert signals[json.dumps(["WT", "steady"])] == -1
+    assert signals[json.dumps(["sick", "steady"])] == 1
+    tidy = sb.build_tidy_level([Plate(1), Plate(2)], STRAINS, 1, sb.classic_layout().levels[0],
+                              experiment="x", treatment="x", set_label="TC")
+    csv = tmp_path / "x.csv"
+    tidy.to_csv(csv, index=False)
+    sp.draw(csv, tmp_path / "figures", **settings)
+    table = pd.read_csv(tmp_path / "figures" / ("spotting_anova.csv" if
+                        settings["statistical_test"] == "anova" else "spotting_paired_ttests.csv"))
+    expected = {json.dumps([r.group1, r.group2]): 1 if r.mean_ratio > 1 else -1
+                for r in table.itertuples() if r.p_adj <= settings["alpha"] and r.group2 != "all strains"}
+    assert signals == expected
+    assert metrics["n_significant"] == len(expected)
+    assert len(table) == len({frozenset((r.group1, r.group2)) for r in table.itertuples()})
+    assert all(table.group1 != table.group2)
+
+
+def test_a_rim_spot_is_named_not_the_whole_comparison():
+    import spotting_timecourse as stc
+    tidy = pd.DataFrame({
+        "strain": ["WT BY", "ΔGTR1", "ΔGTR1"], "replicate": ["rep1", "rep1", "rep2"],
+        "raw_growth": [40.0, 30.0, 31.0], "artifact": [False, False, True],
+        "roi_quality": ["", "", ""]})
+    assert stc._spot_notes(tidy) == ["ΔGTR1 rep2 near plate rim"]

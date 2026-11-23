@@ -423,7 +423,10 @@ def test_compound_edits_are_one_undo_step(ctl):
 
 
 def test_reselecting_same_folder_adopts_conditions_in_one_step(ctl):
-    ctl.remove_condition("GLU")
+    # Undeclared intake data, rather than an explicit deletion which clears
+    # linked photo assignments to prevent accidental reassignment.
+    ctl.experiment.conditions.clear()
+    ctl.reresolve()
     before = ctl.snapshot()
     assert ctl.set_photo_root(Path(ctl.experiment.photo_root), adopt_conditions=True)
     assert ctl.experiment.has_condition("GLU")
@@ -435,7 +438,8 @@ def test_reselecting_same_folder_adopts_conditions_in_one_step(ctl):
 def test_restoring_and_clearing_actions_are_also_undoable(ctl, action):
     path = ctl.files[0].relpath
     if action == "adopt":
-        ctl.remove_condition("GLU")
+        ctl.experiment.conditions.clear()
+        ctl.reresolve()
         edit = ctl.adopt_found_conditions
     elif action == "include":
         ctl.set_ignored([path], True)

@@ -199,15 +199,15 @@ def oriented_rows_for(template, plate_id, index: int,
     }))
 
 
-def scorable_levels(template, plate_id) -> list[int]:
+def scorable_levels(template, plate_id, controls=()) -> list[int]:
     """Levels that can actually be quantified on this plate.
 
     `PlateSlot.scorable_dilutions` already encodes the rule: a level is usable
-    only when every unit on the plate has a spot at it and the control is among
-    them, because each spot is relativised to a control on its own plate.
+    only when every unit on the plate has a spot at it and the `controls` are
+    among them, because each spot is relativised to a control on its own plate.
     """
     plate = _plate(template, plate_id)
-    return sorted(plate.scorable_dilutions()) if plate is not None else []
+    return sorted(plate.scorable_dilutions(controls)) if plate is not None else []
 
 
 def plate_ids(template) -> list[str]:

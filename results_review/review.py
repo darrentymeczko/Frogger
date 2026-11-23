@@ -109,3 +109,21 @@ def stale_picks(run: SetRun, review: Review) -> list[str]:
     """Media whose recorded pick no longer matches any scored candidate."""
     return [m for m in sorted(review.picks)
             if m in run.media and chosen_candidate(run, review, m) is None]
+
+
+def analysis_changed(run, review, recorded_config=None):
+    """Historical candidate scores cannot be reused after reference changes."""
+    from experiments import analysis
+    if review.measurement:
+        return True
+    if not review.final_analysis:
+        return False
+    info = getattr(run, "experiment", None)
+    cfg = recorded_config or (info.pipeline_config if info else {})
+    if not cfg:
+        return True  # No evidence that historical scores used these choices.
+    old = analysis.from_pipeline(cfg)
+    new = review.final_analysis
+    return (old["all_pairs"] != new["all_pairs"] or any(
+        analysis.normalization(old, m) != analysis.normalization(new, m) or
+        analysis.references(old, m) != analysis.references(new, m) for m in run.media))

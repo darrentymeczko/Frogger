@@ -122,7 +122,7 @@ def test_template_derives_panel_size_and_replicates():
     assert t.spot_count() == 4
 
 
-def test_scorable_dilutions_requires_full_coverage_and_a_control():
+def test_scorable_dilutions_requires_full_coverage_and_the_controls():
     t = _two_by_two()
     p = t.plate("1")
     assert p.scorable_dilutions() == {0, 1}
@@ -131,9 +131,18 @@ def test_scorable_dilutions_requires_full_coverage_and_a_control():
     p.set(1, 1, UNASSIGNED)
     assert p.scorable_dilutions() == {0}
 
-    # With no control designated nothing is scorable.
+    # A control the plate never spots makes nothing scorable.
+    assert p.scorable_dilutions(controls={9}) == set()
+    assert p.scorable_dilutions(controls={1}) == {0}
+
+
+def test_scorable_dilutions_ignores_the_legacy_plate_control():
+    # The control is chosen in the experiment; a design drawn without one on
+    # the plate must not be reported as unquantifiable.
+    t = _two_by_two()
+    p = t.plate("1")
     p.control_slot = None
-    assert p.scorable_dilutions() == set()
+    assert p.scorable_dilutions() == {0, 1}
 
 
 def test_control_cells_and_override():

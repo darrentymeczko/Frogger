@@ -168,11 +168,11 @@ def test_each_kind_of_document_opens_in_a_tab(shell, result_set):
 
 def test_the_menubar_follows_the_active_tab(shell):
     plate = shell.open_document("plate")
-    assert menus(shell) == ["File", "Edit", "View", "Window", "Help"]
+    assert menus(shell) == ["File", "Edit", "Plate", "View", "Window", "Help"]
     shell.open_document("experiment")
     assert menus(shell) == ["File", "Edit", "Window", "Help"]
     shell.activate(plate)
-    assert menus(shell) == ["File", "Edit", "View", "Window", "Help"]
+    assert menus(shell) == ["File", "Edit", "Plate", "View", "Window", "Help"]
     shell.activate(None)
     assert menus(shell) == ["File", "Window", "Help"]
 
@@ -183,7 +183,7 @@ def test_a_documents_file_menu_ends_with_close_tab_and_exit(shell):
     labels = [file_menu.entrycget(i, "label")
               for i in range(file_menu.index("end") + 1)
               if file_menu.type(i) == "command"]
-    assert labels[-2:] == ["Close tab", "Exit Spotting Quantification"]
+    assert labels[-2:] == ["Close tab", "Exit Frogger"]
     assert doc.close_label == "Close tab"
 
 

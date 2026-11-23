@@ -80,10 +80,11 @@ def test_previous_graph_is_cleared_before_a_failed_redraw(frame, monkeypatch,
     assert (tmp_path / "GLU" / "plot_error.log").exists()
 
 
-def test_empty_frame_draws_nothing(frame, tmp_path):
+def test_no_usable_ratios_draws_an_explanation(frame, tmp_path):
     frame.tidy["excluded"] = True
     graph, ok = draw_preview(frame, tmp_path)
-    assert graph is None and not ok
+    assert graph.exists() and ok
+    assert graph.with_suffix(".pdf").exists()
 
 
 def test_preview_stays_in_scratch(frame, tmp_path):

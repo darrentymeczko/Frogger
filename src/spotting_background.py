@@ -7,7 +7,8 @@ The directional pass order, maximum-filter offset, corner correction and
 float32 arithmetic are intentional. A separable morphological opening is not
 an interchangeable implementation of this measurement protocol.
 
-Numba compiles the Python loops locally; neither Java nor FIJI is used.
+Numba compiles the Python loops locally; neither Java nor FIJI is used. The
+compiled loops release the GIL, so several photos can be subtracted in threads.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import numpy as np
 from numba import njit
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _line(pixels, start, inc, length, c, cache, next_point, edges):
     minimum = np.float32(np.inf)
     last = 0
@@ -84,7 +85,7 @@ def _line(pixels, start, inc, length, c, cache, next_point, edges):
     return left, right
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _filter3(p, w, h, maximum):
     shift = 0.0
     for n, count, step, line_step in ((w, h, 1, w), (h, w, w, 1)):
@@ -106,7 +107,7 @@ def _filter3(p, w, h, maximum):
     return np.float32(shift/w/h)
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _background(p, w, h, radius, presmooth, correct_corners):
     c = np.float32(0.5)/radius
     diagonal = np.float32(1)/radius

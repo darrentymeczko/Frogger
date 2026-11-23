@@ -167,14 +167,7 @@ def build_tidy_for_candidate(cand: dict, rows, cache_dir: Path,
         control_col, exclude = resolve(cand["medium"])
 
     level = _level(rows, layout)
-    plates = []
-    for shot in tc.cand_shots(cand):
-        try:
-            plates.append(tc._cached_measure(shot.path, shot.plate,
-                                             level.quant_rows(shot.plate),
-                                             cache_dir, layout))
-        except Exception:
-            return None
+    plates = tc.candidate_plates(cand, level, cache_dir, layout)
 
     # Named exactly as `sb.build_tidy` named it from the combo "<set>|<cid>",
     # so a sheet's graph keys and labels are unchanged.
@@ -188,6 +181,7 @@ def build_tidy_for_candidate(cand: dict, rows, cache_dir: Path,
         return None
     if tidy is None or tidy.empty:
         return None
+    tidy["analysis_condition"] = cand["medium"]
     return tidy, plates
 
 
@@ -509,7 +503,7 @@ def _compose(out_path: Path, montage_png: Path, graph_png: "Path | None",
     sub = "     ".join(f"plate {s.plate}: {s.path.name}" for s in shots)
     # Median CV and the control's grey level used to follow here; they are in
     # the candidates CSV and the review's table, not on the figure.
-    if metrics and metrics.get("n_significant") is not None:
+    if metrics and pd.notna(metrics.get("n_significant")):
         # Named, because the count is the experiment's own test -- the one the
         # graph beside it draws. A CSV from before it was recorded counted an
         # uncorrected t-test at p < 0.05, so that is what it says.
@@ -563,8 +557,8 @@ def _compose(out_path: Path, montage_png: Path, graph_png: "Path | None",
         if path.exists():
             with Image.open(path) as im:
                 carried[name] = im.convert("RGB")
-    # The sheet shows whichever orientation of the plate lays out better
-    # beside or above the graph; both travel with it for the review.
+    # Preserve the photograph's orientation in every output size. The legacy
+    # turned panel still travels as ancillary data for older sheet readers.
     panels = ss.best_montage(carried, ss.SHEET_BOX)
     # Pass 1 settles the arrangement and so the width the text has to fill;
     # pass 2 places the text strips, drawn to that width, around the panels.

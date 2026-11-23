@@ -13,6 +13,10 @@ The canvas owns no editing rules. A drag is turned into a Plan by a provider
 the application supplies, drawn as ghosts, and only committed on release, so
 what the user sees before letting go is exactly what gets written.
 
+A tool can also ask for a selection first (`select_provider`): a drag that
+starts outside the selection then picks cells instead of editing, and only a
+drag that starts inside it goes to the plan provider.
+
 All cell geometry goes through `cell_rect()` so a later photo overlay only has
 to change one function.
 """
@@ -55,11 +59,21 @@ class GridCanvas(tk.Canvas):
         self.edit_handler: Callable[[tuple[int, int]], None] | None = None
         #: Supplied by the app: the empty-grid prompt.
         self.empty_hint: str = ""
+        #: Supplied by the app for tools that select before they edit: turns a
+        #: selecting drag (anchor, current) into the cells it picks up.
+        self.select_provider: Callable[
+            [tuple[int, int], tuple[int, int]], set[tuple[int, int]]
+        ] | None = None
+        #: The cells the next edit acts on; read by the app's plan provider.
+        self.selection: set[tuple[int, int]] = set()
 
         self._origin = (0.0, 0.0)
         self._pitch = 0.0
         self._hover: tuple[int, int] | None = None
         self._anchor: tuple[int, int] | None = None
+        #: True while the current drag is picking cells rather than editing.
+        self._selecting = False
+        self._pending_selection: set[tuple[int, int]] | None = None
         #: (slot, replicate) -> least dilute level present; rebuilt per redraw.
         self._lowest_dilution: dict[tuple[int, int], int] = {}
         self._preview: Plan | None = None
@@ -78,6 +92,7 @@ class GridCanvas(tk.Canvas):
         self.bind("<B1-Motion>", self._on_drag)
         self.bind("<ButtonRelease-1>", self._on_release)
         self.bind("<Double-Button-1>", self._on_double)
+        self.bind("<Escape>", lambda _e: self.clear_selection())
 
     # -- model access --------------------------------------------------------
 
@@ -142,7 +157,11 @@ class GridCanvas(tk.Canvas):
         if self.click_handler is not None:
             self.click_handler(cell)
             return
+        self.focus_set()  # so Escape reaches the selection
         self._anchor = cell
+        self._selecting = (
+            self.select_provider is not None and cell not in self.selection
+        )
         self._update_preview(cell)
 
     def _on_drag(self, event: tk.Event) -> None:
@@ -153,10 +172,23 @@ class GridCanvas(tk.Canvas):
             self._update_preview(cell)
 
     def _on_release(self, _event: tk.Event) -> None:
+        if self._selecting:
+            picked, self._pending_selection = self._pending_selection, None
+            self._selecting, self._anchor = False, None
+            self.selection = picked or set()
+            self.redraw()
+            return
         plan, self._preview, self._anchor = self._preview, None, None
         if plan is not None and self.commit_handler is not None:
+            # The selection is spent once its edit lands.
+            self.selection = set()
             self.commit_handler(plan)
         self.redraw()
+
+    def clear_selection(self) -> None:
+        if self.selection or self._pending_selection:
+            self.selection, self._pending_selection = set(), None
+            self.redraw()
 
     def _on_double(self, event: tk.Event) -> None:
         cell = self.cell_at(event.x, event.y)
@@ -166,9 +198,14 @@ class GridCanvas(tk.Canvas):
             self.edit_handler(cell)
 
     def _update_preview(self, current: tuple[int, int]) -> None:
-        if self._anchor is None or self.plan_provider is None:
+        if self._anchor is None:
             return
-        self._preview = self.plan_provider(self._anchor, current)
+        if self._selecting:
+            self._pending_selection = self.select_provider(self._anchor, current)
+        elif self.plan_provider is not None:
+            self._preview = self.plan_provider(self._anchor, current)
+        else:
+            return
         self.redraw()
 
     def flash(self, cells) -> None:
@@ -211,6 +248,7 @@ class GridCanvas(tk.Canvas):
         for r in range(self.template.rows):
             for c in range(self.template.cols):
                 self._draw_cell(r, c)
+        self._draw_selection()
         self._draw_preview()
         self._draw_empty_hint()
 
@@ -345,6 +383,19 @@ class GridCanvas(tk.Canvas):
             self.create_oval(
                 x0 + inset, y0 + inset, x1 - inset, y1 - inset,
                 outline=theme.CONTROL_RING, width=2,
+            )
+
+    def _draw_selection(self) -> None:
+        """Outline the selected cells, or the ones a selecting drag covers."""
+        cells = (
+            self._pending_selection
+            if self._pending_selection is not None
+            else self.selection
+        )
+        for r, c in cells:
+            x0, y0, x1, y1 = self.cell_rect(r, c)
+            self.create_rectangle(
+                x0 + 1, y0 + 1, x1 - 1, y1 - 1, outline=theme.ACCENT, width=3
             )
 
     def _draw_preview(self) -> None:

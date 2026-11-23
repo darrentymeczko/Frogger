@@ -83,13 +83,13 @@ def test_a_redrawn_graph_never_covers_the_spots(tmp_path):
         assert pieces["graph"].getpixel((10, 10)) == (20, 160, 20)
 
 
-def test_the_plate_is_turned_when_that_fills_the_space_better():
+def test_the_plate_orientation_is_stable_when_the_box_changes():
     wide = Image.new("RGB", (1200, 800))              # 12 x 8 as photographed
     turned = Image.new("RGB", (800, 1200))
     graph = Image.new("RGB", (2400, 1300), "white")   # a 24-strain graph
     pieces = {"montage": wide, "montage_rot": turned, "graph": graph}
-    # A wide pane: the turned plate stands beside the graph.
-    assert ss.best_montage(pieces, (2400, 1000))["montage"] is turned
+    # Resizing or exporting must never silently turn the plate.
+    assert ss.best_montage(pieces, (2400, 1000))["montage"] is wide
     # A very wide, short pane: as photographed, beside the graph.
     assert ss.best_montage(pieces, (4000, 700))["montage"] is wide
     # The carried extras never reach a layout.
@@ -375,3 +375,73 @@ def test_an_older_wide_sheet_keeps_its_whole_montage(tmp_path):
     out = _combine_preview(path, graph, tmp_path / "combined.png")
     with Image.open(out) as im:
         assert im.getpixel((700, 300)) == (0, 0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Where each spot lands in a view, so the review can link it to its table row
+# ---------------------------------------------------------------------------
+
+
+def _tone(slot, rep):
+    """A grey unique to one spot, so a pixel says which spot it belongs to."""
+    return (40 + 30 * slot + 10 * rep,) * 3
+
+
+def _spot_sheet(tmp_path):
+    """Three strains, two replicates, every spot its own grey; both graphs."""
+    montage = Image.new("RGB", (600, 400), (0, 0, 0))
+    spots = []
+    for i, name in enumerate("ABC"):
+        for rep in (1, 2):
+            x, y = 100 + 200 * i, 100 + 200 * (rep - 1)
+            montage.paste(_tone(i + 1, rep), (x - 40, y - 40, x + 40, y + 40))
+            spots.append({"x": x, "y": y, "r": 40, "strain": name,
+                          "slot": i + 1, "rep": rep, "level": 0})
+    graph_h = Image.new("RGB", (600, 900), "white")
+    pieces = {"montage": montage, "graph": Image.new("RGB", (900, 600), "white"),
+              "graph_h": graph_h}
+    extra = {"level": 0,
+             "montage_map": {"size": [600, 400], "spots": spots},
+             "graph_map": {"size": [900, 600], "axis_y": 502, "pitch": 300,
+                           "ticks": [{"name": n, "x": 150 + 300 * i}
+                                     for i, n in enumerate("ABC")]},
+             "graph_h_map": {"orientation": "horizontal", "size": [600, 900],
+                             "axis_x": 100, "pitch": 300,
+                             "ticks": [{"name": n, "y": 150 + 300 * i}
+                                       for i, n in enumerate("ABC")]}}
+    im, lay = ss.arrange({k: v for k, v in pieces.items() if k != "graph_h"},
+                         ss.SHEET_BOX)
+    return ss.save(im, lay, tmp_path / "s.png", extra=extra, panels=pieces)
+
+
+@pytest.mark.parametrize("mode,rotate", [("fit", False), ("fit", True),
+                                         ("aligned", False), ("aligned", True)])
+def test_every_spot_is_reported_where_it_is_drawn(tmp_path, mode, rotate):
+    path = _spot_sheet(tmp_path)
+    with Image.open(path) as im:
+        view, spots, _ = ss.view_spots(im, mode, (1000, 700), rotate)
+    with Image.open(path) as im:
+        assert view.size == ss.view(im, mode, (1000, 700), rotate).size
+    assert sorted((s["slot"], s["rep"]) for s in spots) == [
+        (slot, rep) for slot in (1, 2, 3) for rep in (1, 2)]
+    for s in spots:
+        got = view.getpixel((round(s["x"]), round(s["y"])))
+        want = _tone(s["slot"], s["rep"])
+        assert all(abs(a - b) <= 3 for a, b in zip(got, want)), s
+        # Half the spot pitch in view pixels, from the map's own 40 px.
+        assert s["r"] == pytest.approx(40 * s["k"])
+
+
+def test_the_aligned_view_says_how_it_turned_each_spot(tmp_path):
+    with Image.open(_spot_sheet(tmp_path)) as im:
+        _, upright, _ = ss.view_spots(im, "aligned", (1000, 700), False)
+        _, sideways, _ = ss.view_spots(im, "aligned", (1000, 700), True)
+    assert {s["turn"] for s in upright} == {0}
+    assert {s["turn"] for s in sideways} == {90}
+
+
+def test_a_sheet_without_a_spot_map_has_no_spots(tmp_path):
+    path, _ = _sheet(tmp_path)
+    with Image.open(path) as im:
+        view, spots, plates = ss.view_spots(im, "fit", (800, 600))
+    assert spots == [] and view.width <= 800

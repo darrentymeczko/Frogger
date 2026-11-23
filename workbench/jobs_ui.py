@@ -42,6 +42,30 @@ _STATE_ICON = {Job.QUEUED: ("more", t.TEXT_MUTED),
                Job.STOPPED: ("stop", t.TEXT_MUTED)}
 
 
+#: A bar's full scale. The indeterminate animation steps 1 unit per tick and
+#: bounces once per `maximum`, so this is also how many ticks one sweep takes:
+#: at a scale of 1 the block jumped end to end every tick and flashed.
+BAR_SPAN = 100
+
+
+def _progress(bar, job):
+    """Called only by the UI's queue pump/timer, shared by both views."""
+    if job.state == Job.RUNNING and job.progress is None:
+        if str(bar.cget("mode")) != "indeterminate":
+            bar.stop()
+            bar.configure(mode="indeterminate", value=0)
+            bar.start(40)
+        return
+    bar.stop()
+    value = 0.0
+    if job.state == Job.DONE:
+        value = BAR_SPAN  # confirmed successful exit, not an estimate
+    elif job.progress is not None and job.state != Job.QUEUED:
+        done, total = job.progress
+        value = BAR_SPAN * done / total
+    bar.configure(mode="determinate", value=value)
+
+
 class _Row(tk.Frame):
     def __init__(self, master, job: Job, on_open: Callable[[Job], None]) -> None:
         super().__init__(master, background=t.SURFACE, cursor="hand2")
@@ -54,13 +78,14 @@ class _Row(tk.Frame):
                               foreground=t.TEXT, anchor="w")
         self.title.grid(row=0, column=1, sticky="ew", padx=(0, pad))
         self.detail = tk.Label(self, background=t.SURFACE, font=FONT_SMALL,
-                               foreground=t.TEXT_MUTED, anchor="w")
+                               foreground=t.TEXT_MUTED, anchor="w", justify="left", wraplength=240)
         self.detail.grid(row=1, column=1, sticky="ew", padx=(0, pad))
         self.bar = ttk.Progressbar(self, style="Thin.Horizontal.TProgressbar",
-                                   maximum=1.0)
+                                   maximum=BAR_SPAN)
         self.bar.grid(row=2, column=1, sticky="ew", padx=(0, pad),
                       pady=(px(self, 2), px(self, 6)))
         self.columnconfigure(1, weight=1)
+        self.bind("<Configure>", lambda e: self.detail.configure(wraplength=max(80, e.width - 60)))
         for widget in (self, self.icon, self.title, self.detail):
             widget.bind("<ButtonRelease-1>", lambda _e: on_open(job))
             widget.bind("<Enter>", lambda _e: self._paint(t.SURFACE_ALT))
@@ -77,20 +102,11 @@ class _Row(tk.Frame):
         glyph, font = icons.get(self, name, 9)
         self.icon.configure(text=glyph, font=font, foreground=colour)
         self.detail.configure(text=job.describe())
-        if job.state == Job.RUNNING:
-            self.bar.grid()
-            if job.progress is not None:
-                done, total = job.progress
-                if str(self.bar.cget("mode")) != "determinate":
-                    self.bar.stop()
-                    self.bar.configure(mode="determinate")
-                self.bar.configure(value=done / total)
-            elif str(self.bar.cget("mode")) != "indeterminate":
-                self.bar.configure(mode="indeterminate")
-                self.bar.start(40)
-        else:
-            self.bar.stop()
-            self.bar.grid_remove()
+        _progress(self.bar, job)
+
+    def destroy(self):
+        self.bar.stop()
+        super().destroy()
 
 
 class JobsPanel(ttk.Frame):
@@ -148,9 +164,10 @@ class JobLog(ttk.Frame):
                        padx=(0, px(self, 10)))
         ttk.Label(head, text=job.title, font=FONT_STRONG).grid(
             row=0, column=1, sticky="w")
-        self.detail = ttk.Label(head, style="Muted.TLabel")
-        self.detail.grid(row=1, column=1, sticky="w")
-        self.bar = ttk.Progressbar(head, maximum=1.0)
+        self.detail = ttk.Label(head, style="Muted.TLabel", wraplength=600)
+        self.detail.grid(row=1, column=1, sticky="ew")
+        self.detail.bind("<Configure>", lambda e: self.detail.configure(wraplength=max(80, e.width)))
+        self.bar = ttk.Progressbar(head, maximum=BAR_SPAN)
         self.bar.grid(row=2, column=0, columnspan=3, sticky="ew",
                       pady=(px(self, 8), 0))
 
@@ -202,22 +219,8 @@ class JobLog(ttk.Frame):
         name, colour = _STATE_ICON[job.state]
         glyph, font = icons.get(self, name, 14)
         self.icon.configure(text=glyph, font=font, foreground=colour)
-        self.detail.configure(text=job.describe()
-                              + (f"  ·  {job.phase}" if job.active and job.phase else ""))
-        if job.progress is not None and job.state == Job.RUNNING:
-            done, total = job.progress
-            if str(self.bar.cget("mode")) != "determinate":
-                self.bar.stop()
-                self.bar.configure(mode="determinate")
-            self.bar.configure(value=done / total)
-        elif job.state == Job.RUNNING:
-            if str(self.bar.cget("mode")) != "indeterminate":
-                self.bar.configure(mode="indeterminate")
-                self.bar.start(40)
-        else:
-            self.bar.stop()
-            self.bar.configure(mode="determinate",
-                               value=1.0 if job.state == Job.DONE else 0.0)
+        self.detail.configure(text=job.describe())
+        _progress(self.bar, job)
         if job.finished:
             self.stop_button.pack_forget()
             if (job.state == Job.DONE and job.result_dir is not None
@@ -260,5 +263,8 @@ class JobLog(ttk.Frame):
 
     def tick(self) -> None:
         if self.job.state == Job.RUNNING:
-            self.detail.configure(text=self.job.describe()
-                                  + (f"  ·  {self.job.phase}" if self.job.phase else ""))
+            self.detail.configure(text=self.job.describe())
+
+    def destroy(self):
+        self.bar.stop()
+        super().destroy()

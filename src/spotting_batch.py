@@ -27,7 +27,7 @@ about things it has not seen. Delete that file, or pass --reask, to start over.
 
 Usage:
     python spotting_batch.py "Spotting Assays" [options]
-    (or just double-click run_spotting.bat)
+    (or: py spotting_app.py spotting)
 """
 
 from __future__ import annotations
@@ -54,8 +54,8 @@ from spotting_paths import PROJECT_ROOT   # noqa: E402
 # photos sit on OneDrive and everything written next to them gets synced back
 # up, and a Results folder buried in the image tree is easy to miss and easy to
 # copy around by accident. The two pipelines get their own subfolder so a
-# run_spotting.bat run can never overwrite or be confused with a
-# run_timecourse.bat one -- they answer different questions and the timecourse
+# spotting run can never overwrite or be confused with a
+# timecourse one -- they answer different questions and the timecourse
 # output is triage, not a result to report.
 RESULTS_ROOT = PROJECT_ROOT / "Results"
 MAIN_RESULTS = RESULTS_ROOT / "Spotting"
@@ -105,6 +105,15 @@ class DilutionLevel:
             if int(no) == int(plate):
                 return cells
         raise KeyError(f"dilution level {self.name!r} has no spots on plate {plate}")
+
+    def on_plate(self, plate: int) -> bool:
+        """Whether this level places any spot on one plate.
+
+        A template may declare more levels than it spots (the designer's
+        default is three), or put a level on only some plates; callers that
+        walk every level ask this rather than catch `cells`' KeyError.
+        """
+        return any(int(no) == int(plate) and cells for no, cells in self.plates)
 
     def rows(self, plate: int) -> tuple:
         """0-based grid rows this level occupies on one plate."""
@@ -299,6 +308,7 @@ def build_tidy_level(plates, strains, control_col: int, level: DilutionLevel,
                 "dilution": level.name,
                 "strain_col": cell.slot, "strain": name,
                 "raw_growth": float(pd_.net[cell.row, cell.col]),
+                **(pd_.measurement_fields(cell.row, cell.col) if isinstance(pd_, PlateData) else {}),
                 "artifact": bool(pd_.rim[cell.row, cell.col]),
                 "excluded": cell.slot in drop,
                 "is_control": cell.slot == control_col,
@@ -308,10 +318,10 @@ def build_tidy_level(plates, strains, control_col: int, level: DilutionLevel,
         return full
 
     keep = full[~full["excluded"]].copy()
-    if control_col in drop or keep.empty:
+    if control_col in drop or keep.empty or not (keep["strain_col"] == control_col).any():
         print(f"    ! {experiment}: the control was excluded; "
               f"skipping normalization for this condition.")
-        return full
+        return sq.unavailable_growth(full, "no_included_control")
 
     # Same noise-aware floor as `build_tidy`; see the comment there.
     noise = max([sq.bg_noise(p.bg_samples) for p in plates] or [0.0])
@@ -321,7 +331,12 @@ def build_tidy_level(plates, strains, control_col: int, level: DilutionLevel,
                                   min_control=min_control)
     key = ["experiment", "replicate", "strain_col"]
     added = [c for c in keep.columns if c not in full.columns]
-    return full.merge(keep[key + added], on=key, how="left")
+    out = full.merge(keep[key + added], on=key, how="left")
+    out["control_ok"] = out["control_ok"].fillna(False).astype(bool)
+    out.loc[out["excluded"], "normalization_reason"] = "excluded_by_user"
+    out.loc[out["excluded"], "growth_quality"] = sq.unavailable_growth(
+        out.loc[out["excluded"]], "excluded_by_user")["growth_quality"]
+    return out
 
 CONFIG_NAME = "spotting_config.json"
 CACHE_DIR = ".spotting_cache"
@@ -686,6 +701,31 @@ class PlateData:
     quant_rows: tuple          # dilution rows the ROI was sized to fit ((), if none)
     plate_center: tuple        # agar disc centre, ORIGINAL image pixels (y, x)
     plate_radius: float        # agar disc radius, ORIGINAL image pixels
+    provenance: dict | None = None
+
+    def measurement_fields(self, row, col):
+        p = self.provenance or {}
+        settings = p.get("settings", {"method": "fixed-oval-v23"})
+        fields = {"measurement_method": settings["method"],
+                  "inward_margin": settings.get("inward_margin", 0),
+                  "min_interior_pixels": settings.get("min_pixels", 0),
+                  "background_mean": self.bg_mean}
+        for name in ("scientific_preprocessing", "source_path", "source_sha256"):
+            if name in p:
+                fields[name] = p[name]
+        fields["measurement_error"] = p.get("measurement_error", "")
+        fields["background_samples"] = json.dumps(np.asarray(self.bg_samples).tolist())
+        if "background_centers" in p:
+            fields["background_centers"] = json.dumps(p["background_centers"].tolist())
+        for name in ("raw", "n_px", "quality"):
+            if name in p:
+                fields[{"raw": "roi_mean", "n_px": "roi_pixels", "quality": "roi_quality"}[name]] = p[name][row, col].item()
+        if "roi_boxes" in p:
+            fields.update(zip(("roi_x", "roi_y", "roi_width", "roi_height"),
+                              p["roi_boxes"][row, col]))
+        if "boundary_radii" in p:
+            fields["boundary_radii"] = json.dumps(p["boundary_radii"][row, col].tolist())
+        return fields
 
 
 def _cache_key(path: Path, opts: sq.MeasureOptions) -> str:
@@ -741,6 +781,16 @@ def _cache_key(path: Path, opts: sq.MeasureOptions) -> str:
     #       it flattens better than the local paraboloid (spread 0.08 vs 0.32),
     #       so every cached measurement differs.
     # v23: Python ImageJ-compatible subtraction replaces FIJI/fallback.
+    # v25 (interior method): an untraceable or irregular boundary no longer
+    #     drops the spot, so every cached interior rim flag is stale.
+    # v26 (interior method): the boundary is a robust circle fit to the rays,
+    #     not the raw per-ray edges, so cached boundaries and radii are stale.
+    # v27: centring ignores small bright contaminants beside a spot (both
+    #     methods), and interior ROI sizes are anchored to the concentrated rows.
+    # v28 (interior method): boundaries also follow texture, out to the
+    #     outermost ring of microcolonies.
+    # v29 (interior method): a level fits its own smallest clean spot, within
+    #     25% below the concentrated level.
     nudges = sorted((k, tuple(v)) for k, v in (opts.nudge or {}).items())
     # The spot lattice changes every measured number, so it has to be in the key
     # -- otherwise a plate read as 8x6 would be served for a 12x8 request. It is
@@ -750,8 +800,29 @@ def _cache_key(path: Path, opts: sq.MeasureOptions) -> str:
     rows, cols = opts.grid_shape
     grid = "" if (rows, cols) == (sq.N_ROWS, sq.N_COLS) else f"|{rows}x{cols}"
     sig = (f"{path.name}|{st.st_size}|{int(st.st_mtime)}|{opts.bg_mode}|"
-           f"{opts.ball_radius}|{opts.bg_iters}|{opts.rgb_mode}|{nudges}|v23{grid}")
+           f"{opts.ball_radius}|{opts.bg_iters}|{opts.rgb_mode}|{nudges}|v27{grid}")
+    from spotting_roi import LEGACY_METHOD
+    if opts.roi_settings.method != LEGACY_METHOD:
+        # Full path and nanosecond stat avoid same-name photos colliding. Every
+        # scientific option participates; display options cannot enter here.
+        roi_file = (hashlib.sha256(opts.rois.read_bytes()).hexdigest()
+                    if opts.rois is not None else None)
+        sig += f"|v29|{path.resolve()}|{st.st_mtime_ns}|{opts.roi_settings}|{opts.measure_diameter}|{opts.shrink}|{roi_file}"
     return hashlib.sha1(sig.encode()).hexdigest()[:16]
+
+
+def _read_provenance(z, key):
+    p = {"settings": json.loads(str(z["measurement_settings"]))
+         if "measurement_settings" in z else {"method": "fixed-oval-v23"}}
+    for name in ("scientific_preprocessing", "source_path", "source_sha256"):
+        if name in z:
+            p[name] = str(z[name])
+    if "background_centers" in z:
+        p["background_centers"] = np.asarray(z["background_centers"])
+    for name in ("raw", "n_px", "quality", "roi_boxes", "boundary_radii", "bg_n_px"):
+        if f"{key}_{name}" in z:
+            p[name] = z[f"{key}_{name}"]
+    return p
 
 
 def quant_rows_for(cfg: dict, combo_key: str, ref: "PhotoRef") -> tuple:
@@ -837,7 +908,8 @@ def measure(ref: PhotoRef, opts: sq.MeasureOptions, cache_dir: Path,
     previous: dict = {}
     if cf.exists():
         try:
-            z = np.load(cf)
+            with np.load(cf) as archive:
+                z = {k: archive[k] for k in archive.files}
             key = _rowset_key(want)
             if f"{key}_net" in z:
                 return PlateData(
@@ -845,9 +917,10 @@ def measure(ref: PhotoRef, opts: sq.MeasureOptions, cache_dir: Path,
                     float(z[f"{key}_bg_mean"]), float(z[f"{key}_spread"]),
                     z["centers"], float(z[f"{key}_radius"]),
                     z[f"{key}_bg_samples"], want,
-                    tuple(z["plate_center"]), float(z["plate_radius"]))
+                    tuple(z["plate_center"]), float(z["plate_radius"]),
+                    _read_provenance(z, key))
             # Readable but missing this choice: keep what it does hold.
-            previous = {k: z[k] for k in z.files
+            previous = {k: z[k] for k in z
                         if k not in ("centers", "plate_center", "plate_radius")}
         except Exception:
             previous = {}
@@ -883,6 +956,17 @@ def measure(ref: PhotoRef, opts: sq.MeasureOptions, cache_dir: Path,
     # spot carries sparse micro-colonies, which is the whole point of the
     # preview. Previews are rendered from the original file instead.
     store, out = {}, None
+    store["measurement_settings"] = json.dumps(opts.roi_settings.to_dict(), sort_keys=True)
+    store["source_path"] = str(ref.path.resolve())
+    store["source_sha256"] = hashlib.sha256(Path(read_path or ref.path).read_bytes()).hexdigest()
+    store["background_centers"] = np.asarray(res["_shared"][0], dtype=float)
+    store["scientific_preprocessing"] = json.dumps({"rgb_mode": opts.rgb_mode,
+        "bg_mode": opts.bg_mode, "ball_radius": res["_shared"][3],
+        "bg_iters": opts.bg_iters, "shrink": opts.shrink,
+        "measure_diameter": opts.measure_diameter, "grid_shape": opts.grid_shape,
+        "nudge": {str(k): v for k, v in (opts.nudge or {}).items()},
+        "hand_rois": str(opts.rois) if opts.rois else None,
+        "coordinate_system": "stored-pixels", "intensity": "mean-gray"})
     for rows in row_sets:
         g, m = res[tuple(rows)]
         k = _rowset_key(tuple(rows))
@@ -892,10 +976,17 @@ def measure(ref: PhotoRef, opts: sq.MeasureOptions, cache_dir: Path,
         store[f"{k}_spread"] = spread
         store[f"{k}_radius"] = g.measure_radius
         store[f"{k}_bg_samples"] = np.asarray(m.bg_samples, dtype=float)
+        for name in ("raw", "n_px", "roi_boxes", "quality", "bg_n_px"):
+            value = getattr(m, name)
+            if value is not None:
+                store[f"{k}_{name}"] = np.asarray(value)
+        if g.boundary_radii is not None:
+            store[f"{k}_boundary_radii"] = g.boundary_radii
         d = PlateData(ref, m.net, m.rim_flag, m.bg_mean, spread,
                       g.centers, g.measure_radius,
                       np.asarray(m.bg_samples, dtype=float), tuple(rows),
-                      tuple(g.plate_center), float(g.plate_radius))
+                      tuple(g.plate_center), float(g.plate_radius),
+                      _read_provenance(store, k))
         if tuple(rows) == want or out is None:
             out = d
             geom = g
@@ -1057,6 +1148,7 @@ def build_tidy(combo: str, plates: list[PlateData], strains: list[str | None],
                     "dilution": DILUTION_ORDER[row % 3],
                     "strain_col": col + 1, "strain": name,
                     "raw_growth": float(pd_.net[row, col]),
+                    **(pd_.measurement_fields(row, col) if isinstance(pd_, PlateData) else {}),
                     "artifact": bool(pd_.rim[row, col]),
                     "excluded": (col + 1) in drop,
                     # Carried into the CSV so the plotter tests against
@@ -1072,7 +1164,7 @@ def build_tidy(combo: str, plates: list[PlateData], strains: list[str | None],
     if control_col in drop or keep.empty:
         print(f"    ! {experiment}: the control column was excluded; "
               f"skipping normalization for this combination.")
-        return full
+        return sq.unavailable_growth(full, "no_included_control")
 
     # Whether a control can serve as a denominator depends on this plate's own
     # measurement noise, which we measured: the spread of its five agar reads.
@@ -1087,7 +1179,12 @@ def build_tidy(combo: str, plates: list[PlateData], strains: list[str | None],
                                   min_control=min_control)
     key = ["experiment", "replicate", "strain_col"]
     added = [c for c in keep.columns if c not in full.columns]
-    return full.merge(keep[key + added], on=key, how="left")
+    out = full.merge(keep[key + added], on=key, how="left")
+    out["control_ok"] = out["control_ok"].fillna(False).astype(bool)
+    out.loc[out["excluded"], "normalization_reason"] = "excluded_by_user"
+    out.loc[out["excluded"], "growth_quality"] = sq.unavailable_growth(
+        out.loc[out["excluded"]], "excluded_by_user")["growth_quality"]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1141,6 +1238,8 @@ def main(argv=None) -> int:
                     help=f"Long edge of each plate in the dilution preview "
                          f"(default {PREVIEW_PX}). Larger shows finer colonies.")
     ap.add_argument("--ball-radius", type=float, default=None)
+    ap.add_argument("--inward-margin", type=float, default=0.15,
+                    help="Fraction of safe spot radius excluded from measurement.")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args(argv)
 
@@ -1187,7 +1286,7 @@ def main(argv=None) -> int:
         save_config(cfg_path, cfg)
 
     # --- step 3: measure everything ----------------------------------------
-    opts = sq.MeasureOptions(ball_radius=args.ball_radius)
+    opts = sq.MeasureOptions(ball_radius=args.ball_radius, inward_margin=args.inward_margin)
     cache_dir = folder / CACHE_DIR
     total = sum(len(v) for v in combos.values())
     print("\n" + "=" * 62)
@@ -1534,7 +1633,7 @@ def make_montages(data: dict, cfg: dict, opts: "sq.MeasureOptions",
 def run_plots(csv_path: Path, outdir: Path, *, statistical_test: str = "t_test",
               p_adjust: str = "none", alpha: float = 0.05,
               posthoc: str = "none", extra_references=(),
-              all_pairs: bool = False) -> None:
+              all_pairs: bool = False, comparison_references=None) -> None:
     """Draw figures and the selected statistical test with PyPrism Plot."""
     csv_path = Path(csv_path).resolve()
     outdir = Path(outdir).resolve()
@@ -1553,7 +1652,7 @@ def run_plots(csv_path: Path, outdir: Path, *, statistical_test: str = "t_test",
     spotting_plots.draw(csv_path, figures, statistical_test=statistical_test,
                         p_adjust=p_adjust, alpha=alpha, posthoc=posthoc,
                         extra_references=extra_references,
-                        all_pairs=all_pairs)
+                        all_pairs=all_pairs, comparison_references=comparison_references)
 
 
 if __name__ == "__main__":

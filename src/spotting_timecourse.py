@@ -852,7 +852,7 @@ def measure_all(jobs, cache_dir: Path, workers: int, timing: bool = False):
 
 @lru_cache(maxsize=None)
 def _cached_measure(path: Path, plate: int, rows: tuple, cache_dir: Path,
-                    layout: "sb.DilutionLayout | None" = None):
+                    layout: "sb.DilutionLayout | None" = None, measurement=None):
     """`sb.measure` off the cache, memoized for the scoring pass.
 
     Scoring reads the same photo once per (candidate, row-set, shot) -- six
@@ -866,10 +866,15 @@ def _cached_measure(path: Path, plate: int, rows: tuple, cache_dir: Path,
     layout, exactly as before.
     """
     ref = sb.PhotoRef(path, 0, plate, "TC")
+    options = sq.MeasureOptions()
+    if measurement is not None:
+        options = replace(options, roi_method=measurement.method,
+                          inward_margin=measurement.inward_margin,
+                          min_interior_pixels=measurement.min_pixels)
     if layout is None or layout.is_classic():
-        opts = replace(sq.MeasureOptions(), quant_rows=rows)
+        opts = replace(options, quant_rows=rows)
         return sb.measure(ref, opts, cache_dir)
-    opts = replace(sq.MeasureOptions(), quant_rows=rows,
+    opts = replace(options, quant_rows=rows,
                    n_rows=layout.n_rows, n_cols=layout.n_cols)
     return sb.measure(ref, opts, cache_dir, row_sets=layout.row_sets(plate))
 
@@ -885,6 +890,54 @@ def as_level(rows_or_level, layout: "sb.DilutionLayout | None" = None):
     if isinstance(rows_or_level, sb.DilutionLevel):
         return rows_or_level
     return (layout or sb.classic_layout()).by_rows(rows_or_level)
+
+
+def candidate_plates(cand, level, cache_dir, layout=None, measurement=None):
+    """Keep a failed plate's cells identifiable without inventing measurements."""
+    from spotting_roi import ROISettings
+    layout = layout or sb.classic_layout()
+    plates = []
+    for shot in cand_shots(cand):
+        if not level.on_plate(shot.plate):
+            continue  # this level is not spotted on that plate at all
+        try:
+            extra = {"measurement": measurement} if measurement else {}
+            plate = _cached_measure(shot.path, shot.plate,
+                                    level.quant_rows(shot.plate), cache_dir,
+                                    layout, **extra)
+        except Exception as exc:
+            shape = (layout.n_rows, layout.n_cols)
+            missing = np.full(shape, np.nan)
+            plate = sb.PlateData(
+                ref=sb.PhotoRef(shot.path, 0, shot.plate, "TC"),
+                net=missing, rim=np.ones(shape, bool), bg_mean=np.nan,
+                spread=np.nan, centers=np.full((*shape, 2), np.nan),
+                radius=np.nan, bg_samples=np.array([]),
+                quant_rows=level.quant_rows(shot.plate),
+                plate_center=(np.nan, np.nan), plate_radius=np.nan,
+                provenance={"settings": (measurement or ROISettings()).to_dict(),
+                            "source_path": str(shot.path),
+                            "quality": np.full(shape, "measurement_failed"),
+                            "measurement_error": f"{type(exc).__name__}: {exc}"})
+        plates.append(plate)
+    return plates
+
+
+def _spot_notes(tidy) -> list[str]:
+    """One note per spot whose own measurement is in doubt, e.g.
+    "ΔGTR1 rep2 near plate rim"."""
+    notes = []
+    quality = tidy["roi_quality"] if "roi_quality" in tidy else None
+    for i, row in tidy.iterrows():
+        spot = f"{row['strain']} {row['replicate']}"
+        if bool(row.get("artifact", False)):
+            notes.append(f"{spot} near plate rim")
+        elif not np.isfinite(row["raw_growth"]):
+            notes.append(f"{spot} not measurable")
+        q = quality[i] if quality is not None else None
+        if isinstance(q, str) and q:
+            notes.append(f"{spot} {q.replace('_', ' ')}")
+    return notes
 
 
 def score_candidate(cand, rows, cache_dir: Path, strains, control_col,
@@ -912,53 +965,50 @@ def score_candidate(cand, rows, cache_dir: Path, strains, control_col,
     """
     level = as_level(rows, layout)
     ex = set(exclude or [])
-    rel, ctrl_vals = {}, []
-    ctrl_expected = 0
-    plates = []
-    for shot in cand_shots(cand):
-        try:
-            cells = level.cells(shot.plate)
-            pd_ = _cached_measure(shot.path, shot.plate,
-                                  level.quant_rows(shot.plate), cache_dir, layout)
-        except Exception:
-            return None
-        plates.append(pd_)
-        # Every control replicate on THIS plate forms its denominator, however
-        # many the design spots -- two per plate in the lab layout, four on a
-        # single plate, or any other number.
-        ctrl_expected += sum(1 for c in cells if c.slot == control_col)
-        good = [pd_.net[c.row, c.col] for c in cells
-                if c.slot == control_col and not pd_.rim[c.row, c.col]]
-        if not good:
-            return None
-        div = float(np.mean(good))
-        if div <= sq.MIN_CONTROL_GRAY:
-            return None
-        ctrl_vals.extend(good)
-        for c in cells:
-            name = strains[c.slot - 1] if c.slot - 1 < len(strains) else None
-            if (c.slot == control_col or not name or c.slot in ex
-                    or pd_.rim[c.row, c.col]):
-                continue
-            rel.setdefault(name, []).append(float(pd_.net[c.row, c.col]) / div)
-
-    if not ctrl_vals:
-        return None
-    cm = float(np.mean(ctrl_vals))
+    plates = candidate_plates(cand, level, cache_dir, layout)
+    ctrl_expected = sum(1 for p in plates for c in level.cells(p.ref.plate)
+                        if c.slot == control_col)
+    import contextlib
+    import io
+    import spotting_plots as sp
+    with contextlib.redirect_stdout(io.StringIO()):
+        tidy = sb.build_tidy_level(plates, strains, control_col, level, ex,
+                                   experiment="scoring", treatment="scoring", set_label="TC")
+    reasons = []
     cvs, n_str = [], 0
-    for strain_name, v in rel.items():
-        v = np.asarray(v, float)
-        if len(v) < 3 or v.mean() <= 0:
-            continue
-        n_str += 1
-        cvs.append(float(v.std() / v.mean()))
+    ctrl_vals = []
+    tested = None
+    if not tidy.empty:
+        tidy["analysis_condition"] = cand["medium"]
+        usable = sp._filtered(tidy, "relative_growth", keep_artifacts=False,
+                              keep_outliers=False)
+        tested = usable if not usable.empty else None
+        tidy["analysis_condition"] = cand["medium"]
+        ctrl_vals = tidy.loc[(tidy["strain_col"] == control_col)
+                             & ~tidy["artifact"] & ~tidy["excluded"]
+                             & np.isfinite(tidy["raw_growth"]), "raw_growth"].tolist()
+        for name, group in usable[usable["strain_col"] != control_col].groupby("strain"):
+            v = group["relative_growth"].to_numpy(float)
+            if len(v) >= 3 and v.mean() > 0:
+                cvs.append(float(v.std() / v.mean()))
+                n_str += 1
+        # A rim or ROI problem belongs to one spot, so name that spot rather
+        # than marking the whole comparison as unsuitable.
+        reasons.extend(_spot_notes(tidy))
+        if tidy["growth_quality"].eq("low_growth").any():
+            reasons.append("low_growth")
+        reasons.extend(r for r in tidy["normalization_reason"].dropna()
+                       if r and r != "unsuitable_measurement_roi")
+    cm = float(np.mean(ctrl_vals)) if ctrl_vals else np.nan
     if not cvs:
-        return None
-    tested = _tested_frame(plates, strains, control_col, level, ex)
-    out = {"median_CV": float(np.median(cvs)),
+        reasons.append("cv_unavailable_insufficient_or_nonpositive_growth")
+    out = {"median_CV": float(np.median(cvs)) if cvs else np.nan,
            "control_mean": cm,
            "control_CV": float(np.std(ctrl_vals) / cm) if cm > 0 else np.nan,
            "n_strains": n_str, "n_significant": None,
+           "quality_flags": ";".join(dict.fromkeys(reasons)),
+           "statistics_available": bool(tested is not None and any(
+               len(g) >= 2 for _, g in tested[tested["strain_col"] != control_col].groupby("strain"))),
            "control_n": len(ctrl_vals),
            # How many control spots the design put on these plates at this
            # level, for the completeness term. Underscored like _strain_sigs:
@@ -970,7 +1020,7 @@ def score_candidate(cand, rows, cache_dir: Path, strains, control_col,
         out["_tested"] = tested
         return out
     sigs = significant_strains(tested, statistics)
-    out["n_significant"] = len(sigs)
+    out["n_significant"] = len(sigs) if out["statistics_available"] else np.nan
     out["_strain_sigs"] = sigs     # strain -> +1 increased / -1 reduced
     return out
 
@@ -1003,13 +1053,12 @@ def _tested_frame(plates, strains, control_col, level, exclude):
 
 
 def significant_strains(group, statistics: "dict | None" = None) -> dict:
-    """{strain: +1 increased / -1 reduced} for every strain the experiment's
-    test calls different from the control.
+    """Significant requested contrasts and their direction (+1 / -1).
 
-    The renderer's own test (`spotting_plots.vs_control`), at its own cutoff
-    (p <= alpha), so a strain counts here exactly when its graph has a bracket
-    to the control. `statistics` is `run_plots`' keyword arguments; None, or
-    a key left out, is its default. An omnibus-only ANOVA names no strain.
+    Explicit final references use JSON [reference, target] keys so opposing
+    effects against different references remain distinct. Legacy selections
+    retain strain keys. Uses the renderer's test and cutoff; omnibus-only
+    ANOVA contributes no contrasts.
     """
     import spotting_plots as sp
 
@@ -1019,11 +1068,28 @@ def significant_strains(group, statistics: "dict | None" = None) -> dict:
     control = sp._control_for(group)
     if control not in set(group["strain"]):
         return {}
+    if s.get("comparison_references") is not None:
+        # Consensus tracks each requested contrast separately: a target can
+        # grow more than one reference and less than another. Collapsing those
+        # into one strain/direction would fabricate agreement across candidates.
+        if s.get("statistical_test") == "anova" and s.get("posthoc", "none") == "none":
+            return {}
+        pairs = sp.comparison_pairs(sp._ordered_strains(group, control), control,
+            all_pairs=bool(s.get("all_pairs", False)),
+            comparison_references=sp.references_for(group, s["comparison_references"]))
+        tests = (sp._anova_test(group, control, s.get("posthoc", "none"), pairs)
+                 if s.get("statistical_test") == "anova" else
+                 sp._ratio_tests(group, control, s.get("p_adjust", "none"), pairs))
+        return {json.dumps([r.group1, r.group2], ensure_ascii=False):
+                1 if r.mean_ratio > 1 else -1 for r in tests.itertuples()
+                if r.group2 != "all strains" and np.isfinite(r.p_adj)
+                and r.p_adj <= float(s.get("alpha", .05))}
     tested = sp.vs_control(group, control,
                            statistical_test=s.get("statistical_test", "t_test"),
                            p_adjust=s.get("p_adjust", "none"),
                            posthoc=s.get("posthoc", "none"),
                            extra_references=s.get("extra_references", ()),
+                           comparison_references=s.get("comparison_references"),
                            all_pairs=bool(s.get("all_pairs", False)))
     alpha = float(s.get("alpha", 0.05))
     return {strain: 1 if ratio > 1.0 else -1
@@ -1136,7 +1202,13 @@ def medium_cfg(cfg: dict, medium: str):
     control cannot be honoured in one place and missed in another.
     """
     m = (cfg.get("media") or {}).get(medium) or {}
-    cc = int(m.get("control_col") or cfg.get("control_col") or 1)
+    if cfg.get("final_analysis"):
+        from experiments.analysis import normalization
+        cc = normalization(cfg["final_analysis"], medium)
+        if cc is None:
+            raise ValueError(f"{medium}: choose final normalization before calculation")
+    else:
+        cc = int(m.get("control_col") or cfg.get("control_col") or 1)
     ex = list(m.get("exclude") if m.get("exclude") is not None
               else (cfg.get("exclude") or []))
     return cc, ex
@@ -1444,27 +1516,35 @@ def build_tidy_for_candidate(cand, rows, cfg, cache_dir, label, layout=None):
     strains = cfg["strains"]
     control_col, ex_list = medium_cfg(cfg, cand["medium"])
     experiment = _tc_experiment(cand, label)
-    plates_m = [
-        _cached_measure(shot.path, shot.plate, level.quant_rows(shot.plate),
-                        cache_dir, layout)
-        for shot in cand_shots(cand)
-    ]
+    from spotting_roi import settings_from_config, ROISettings
+    measurement = settings_from_config(cfg)
+    extra = {} if measurement == ROISettings() else {"measurement": measurement}
+    plates_m = candidate_plates(cand, level, cache_dir, layout,
+                                extra.get("measurement"))
     # `ref.plate` must be the candidate's plate number for the level's cells to
     # line up; `_cached_measure` builds the ref from it, so it is.
-    return sb.build_tidy_level(plates_m, strains, control_col, level, ex_list,
+    tidy = sb.build_tidy_level(plates_m, strains, control_col, level, ex_list,
                                experiment=experiment, treatment=experiment,
                                set_label="TC")
+    tidy["analysis_condition"] = cand["medium"]
+    return tidy
 
 
-def montage_job(cand, rows, strains, out_path, cache_dir, experiment, layout=None):
+def montage_job(cand, rows, strains, out_path, cache_dir, experiment, layout=None,
+                measurement=None):
     """A montage job for any number of plates.
 
     ((path, plate), ...), rows, strains, out_path, cache_dir, experiment, layout
     """
     pairs = tuple((str(s.path), int(s.plate)) for s in cand_shots(cand))
     level = rows if isinstance(rows, sb.DilutionLevel) else tuple(rows)
-    return (pairs, level, strains, str(out_path), str(cache_dir), experiment,
-            layout if layout is not None and not layout.is_classic() else None)
+    result = (pairs, level, strains, str(out_path), str(cache_dir), experiment,
+              layout if layout is not None and not layout.is_classic() else None)
+    return result + (measurement,) if measurement is not None else result
+
+
+def _montage_measurement(job):
+    return job[7] if isinstance(job[0], tuple) and len(job) > 7 else None
 
 
 def _montage_job_parts(job):
@@ -1499,12 +1579,13 @@ def _draw_montage_job(job):
     try:
         import spotting_montage as sm
         level = as_level(rows, layout)
+        measurement = _montage_measurement(job)
         opts_m = replace(sq.MeasureOptions(),
                          quant_rows=level.quant_rows(pairs[0][1]))
         if layout is not None and not layout.is_classic():
             opts_m = replace(opts_m, n_rows=layout.n_rows, n_cols=layout.n_cols)
         plates = [_cached_measure(Path(p), pl, level.quant_rows(pl),
-                                  Path(cache_dir), layout)
+                                  Path(cache_dir), layout, **({"measurement": measurement} if measurement else {}))
                   for p, pl in pairs]
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         sm.build_montage(f"TC|{experiment}", plates, strains, opts_m,
@@ -1594,13 +1675,14 @@ def _draw_montage_chunk(chunk):
                  layout) = _montage_job_parts(job)
                 try:
                     level = as_level(rows, layout)
+                    measurement = _montage_measurement(job)
                     opts_m = replace(sq.MeasureOptions(),
                                      quant_rows=level.quant_rows(pairs[0][1]))
                     if layout is not None and not layout.is_classic():
                         opts_m = replace(opts_m, n_rows=layout.n_rows,
                                          n_cols=layout.n_cols)
                     plates = [_cached_measure(Path(p), pl, level.quant_rows(pl),
-                                              Path(cache_dir), layout)
+                                              Path(cache_dir), layout, **({"measurement": measurement} if measurement else {}))
                               for p, pl in pairs]
                     balls = [opts_m.resolve_ball_radius(
                         2 * float(pd_.radius) / sq.MEASURE_RADIUS_FRAC)
@@ -2100,7 +2182,7 @@ def run_one(tree: "Tree", args, cfg, multi: bool = False, slides=None,
     print(f"\n  {len(shots)} photo(s), "
           f"{len({c['medium'] for c in cands})} medium/media, "
           f"{n_cond} condition-timepoints")
-    n_levels = len(layout.levels)
+    n_levels = len(layout.populated_levels())
     print(f"  {len(cands)} photo pairing(s) x {n_levels} dilutions = "
           f"{len(cands) * n_levels} candidates")
     # One measurement per photo, not per (photo, dilution): every dilution
@@ -2160,6 +2242,10 @@ def run_one(tree: "Tree", args, cfg, multi: bool = False, slides=None,
         # will use.
         cc_m, ex_m = medium_cfg(cfg, c["medium"])
         for level in layout.levels:
+            # A declared level with no spots on these photos has nothing to
+            # score -- a template set to three levels but spotting two.
+            if not any(level.on_plate(s.plate) for s in cand_shots(c)):
+                continue
             rows, nm = level, level.name
             m = score_candidate(c, level, cache, cfg["strains"], cc_m, ex_m,
                                 layout=layout, statistics=statistics,
@@ -2189,7 +2275,7 @@ def run_one(tree: "Tree", args, cfg, multi: bool = False, slides=None,
     # test (Dunnett) can be spread over the workers.
     all_sigs = significance_all(tested, statistics, workers)
     for rec, sigs in zip(recs, all_sigs):
-        rec["n_significant"] = len(sigs)
+        rec["n_significant"] = len(sigs) if rec["statistics_available"] else np.nan
     # (cand, level, strain_sigs, control_n, control_expected), parallel to recs
     cand_meta = [(c, rows, sigs, ctrl_n, ctrl_expected)
                  for (c, rows, ctrl_n, ctrl_expected), sigs
@@ -2265,13 +2351,13 @@ def run_one(tree: "Tree", args, cfg, multi: bool = False, slides=None,
         core_by_medium[medium] = core_m
 
         cvs = grp["median_CV"]
-        pct = (cvs.rank(ascending=False, pct=True) if n_m > 1
-               else pd.Series([1.0] * n_m, index=cvs.index))
+        pct = cvs.rank(ascending=False, pct=True)
         for p, pv in zip(pos, pct):
             _, _, sigs, ctrl_n, ctrl_exp = cand_meta[int(df["_idx"].iloc[p])]
             off = _off_consensus_penalty(sigs, cons_m, n_m, core_m)
-            best_scores[p] = _best_set_score(sigs, ctrl_n, float(pv),
+            best_scores[p] = (_best_set_score(sigs, ctrl_n, float(pv),
                                              core_m, off, ctrl_exp)
+                              if np.isfinite(pv) else np.nan)
     df["best_set_score"] = best_scores
 
     for medium in sorted(cons_by_medium, key=_medium_rank):
@@ -2335,7 +2421,7 @@ def run_one(tree: "Tree", args, cfg, multi: bool = False, slides=None,
               f"CV {row['median_CV']:.2f}   "
               f"control {row['control_mean']:.1f} "
               f"({int(row['control_n'])}/{ctrl_exp} reps)   "
-              f"{int(row['n_significant'])}/{int(row['n_strains'])} significant")
+              f"{row['n_significant']:g} significant tests")
         print(f"             {'  +  '.join(s.path.name for s in cand_shots(cand))}")
         if sigs:
             labels = {1: "increased", -1: "reduced"}
@@ -2367,6 +2453,10 @@ def run_one(tree: "Tree", args, cfg, multi: bool = False, slides=None,
     else:
         outdir = sb.TIMECOURSE_RESULTS / safe_dirname(tree.label)
     outdir.mkdir(parents=True, exist_ok=True)
+    # Old result folders lacking this record remain legacy when reopened.
+    from spotting_roi import ROISettings
+    (outdir / "measurement.json").write_text(
+        json.dumps(ROISettings().to_dict(), indent=2) + "\n", encoding="utf-8")
     out = (args.out if args.out and args.out.suffix.lower() == ".csv" and not multi
            else outdir / "timecourse_candidates.csv")
     df.to_csv(out, index=False, encoding="utf-8-sig")
@@ -2387,7 +2477,7 @@ def run_one(tree: "Tree", args, cfg, multi: bool = False, slides=None,
         print(f"    {medium:>7}  {b['timepoint']:>10}  {b['dilution']:>6} "
               f"dilution   CV {b['median_CV']:.2f}   control "
               f"{b['control_mean']:.1f} (CV {b['control_CV']:.2f})   "
-              f"{int(b['n_significant'])}/{int(b['n_strains'])} significant")
+              f"{b['n_significant']:g} significant tests")
         photos = [str(b[c]) for c in b.index
                   if c.startswith("plate") and c[5:].isdigit() and pd.notna(b[c])]
         print(f"               {'  +  '.join(photos)}")

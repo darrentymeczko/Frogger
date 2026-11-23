@@ -150,14 +150,14 @@ def test_a_timecourse_says_why_too_few_replicates_cannot_be_ranked():
 
 
 def test_the_replicate_floor_matches_the_scorer():
-    """Mirrored from `score_candidate`'s `len(v) < 3`; drift would mislead."""
+    """Mirrored from `score_candidate`'s `len(v) >= 3`; drift would mislead."""
     import inspect
     import re
 
     import spotting_timecourse as tc
 
     source = inspect.getsource(tc.score_candidate)
-    assert re.search(rf"len\(v\) < {validate.TIMECOURSE_MIN_REPLICATES}\b", source)
+    assert re.search(rf"len\(v\) >= {validate.TIMECOURSE_MIN_REPLICATES}\b", source)
 
 
 @pytest.mark.parametrize("plates, reps, rows", [

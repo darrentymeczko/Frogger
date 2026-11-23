@@ -66,11 +66,3 @@ def test_core_modules_are_headless(path):
 def test_the_heavy_stack_is_never_imported_at_module_level(path):
     bad = {n for n in _module_level(path) if n.split(".")[0] in HEAVY}
     assert not bad, f"{path.name} imports {sorted(bad)} at module level"
-
-
-def test_the_launcher_exists_and_runs_this_package():
-    bat = ROOT / "run_data_review.bat"
-    assert bat.exists()
-    text = bat.read_bytes()
-    assert b"data_review.app" in text
-    assert b"\r\n" in text, "cmd.exe mis-parses a .bat without CRLF line endings"

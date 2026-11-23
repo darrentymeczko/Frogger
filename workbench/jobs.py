@@ -162,17 +162,20 @@ class Job:
     def describe(self) -> str:
         """One short line of where it has got to."""
         if self.state == self.QUEUED:
-            return "waiting for the run before it"
+            return "Queued · waiting for the run before it"
         if self.state == self.RUNNING:
+            stage = self.phase or "Starting"
+            prefix = "Cancelling" if self.stop_requested else "Running"
             if self.progress is not None:
                 done, total = self.progress
-                return f"{done}/{total}  ·  {format_elapsed(self.elapsed())}"
-            return f"running  ·  {format_elapsed(self.elapsed())}"
+                return f"{prefix} · {stage} · {done}/{total}  ·  {format_elapsed(self.elapsed())}"
+            return f"{prefix} · {stage}  ·  {format_elapsed(self.elapsed())}"
         if self.state == self.DONE:
-            return f"finished in {format_elapsed(self.elapsed())}"
+            return f"Completed in {format_elapsed(self.elapsed())}"
         if self.state == self.STOPPED:
-            return "stopped"
-        return f"failed (exit code {self.returncode})" if not self.error else self.error
+            return "Cancelled" + (f" · {self.phase}" if self.phase else "")
+        reason = f"exit code {self.returncode}" if not self.error else self.error
+        return f"Failed · {reason}" + (f" · {self.phase}" if self.phase else "")
 
     # -- what the output says ----------------------------------------------------
 
@@ -196,11 +199,14 @@ class Job:
         counter = _COUNTER_LINE.match(text)
         if counter:
             done, total = int(counter.group(1)), int(counter.group(2))
-            if 0 < total and 0 <= done <= total:
-                self.progress = (done, total)
+            self.progress = (done, total) if 0 < total and 0 <= done <= total else None
+            return
         stripped = text.strip()
-        if committed and stripped and not _PROGRESS.fullmatch(stripped):
+        if stripped and (committed or any(c.isalpha() for c in stripped)) and any(c.isalnum() for c in stripped):
             self.phase = stripped
+            # A counter measures its stage only, never the whole job. Until
+            # this new stage supplies its own count, its duration is unknown.
+            self.progress = None
 
 
 def format_elapsed(seconds: float) -> str:
@@ -255,7 +261,14 @@ class JobRunner:
         job = Job(self, spec, owner)
         self.jobs.append(job)
         if not self._must_wait(job):
-            self._launch(job)       # raises OSError if it cannot start at all
+            try:
+                self._launch(job)
+            except OSError as exc:
+                job.state = Job.FAILED
+                job.error = f"could not start: {exc}"
+                job.ended = time.time()
+                self.on_change(job, {"state"})
+                raise
         self.on_change(job, {"state"})
         return job
 
@@ -397,6 +410,7 @@ class JobRunner:
             self.on_change(job, {"state"})
             return
         kill_tree(job.process)
+        self.on_change(job, {"state"})
 
     def running(self) -> list[Job]:
         return [j for j in self.jobs if j.active]

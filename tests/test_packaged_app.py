@@ -31,13 +31,7 @@ import spotting_app as app  # noqa: E402
 #: bat file -> (stage, names both must mention). If a launcher is pointed at a
 #: different module, the .exe must follow, or the two quietly stop agreeing.
 PAIRS = {
-    "run_workbench.bat": ("workbench", ["workbench"]),
-    "run_plate_designer.bat": ("plate", ["plate_template.app"]),
-    "run_experiment_designer.bat": ("experiment", ["experiments.app"]),
-    "run_data_review.bat": ("data-review", ["data_review.app"]),
-    "run_spotting.bat": ("spotting", ["spotting_batch"]),
-    "run_timecourse.bat": ("timecourse", ["spotting_timecourse"]),
-    "run_review.bat": ("review", ["results_review.app", "results_review.cli"]),
+    "run_frogger.bat": ("workbench", ["workbench"]),
 }
 
 
@@ -57,13 +51,12 @@ def test_every_bat_file_is_a_real_stage_and_stage_keys_are_unique():
 
 
 def test_home_offers_each_tool_in_the_order_the_work_happens():
-    """The workbench's Home cards are the four tools that still have a window
+    """The workbench's Home cards are the tools that still have a window
     of their own; the console pipelines are deliberately not among them."""
     from workbench.registry import KINDS
 
-    assert [k.key for k in KINDS] == ["plate", "experiment", "data-review",
-                                      "review"]
-    assert [k.step for k in KINDS] == [1, 2, 3, 4]
+    assert [k.key for k in KINDS] == ["plate", "experiment", "review"]
+    assert [k.step for k in KINDS] == [1, 2, 3]
     assert all(k.key in app.BY_KEY for k in KINDS)
 
 
@@ -109,11 +102,13 @@ def test_an_unknown_stage_is_an_error_not_a_launch(seen, capsys):
     assert "Unknown stage" in capsys.readouterr().err
 
 
-def test_help_lists_every_stage(capsys):
+def test_help_lists_available_stages_and_hides_data_review(capsys):
     assert app.main(["--help"]) == 0
     text = capsys.readouterr().out
+    assert "data-review" not in text
     for stage in app.STAGES:
-        assert stage.key in text, f"--help does not mention {stage.key}"
+        if stage.key not in {"data-review", "data-review-cli"}:
+            assert stage.key in text, f"--help does not mention {stage.key}"
 
 
 def test_review_apply_is_stripped_and_goes_to_the_headless_cli(monkeypatch):

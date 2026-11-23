@@ -80,15 +80,12 @@ class ImageCache:
 
     @staticmethod
     def _with_pil(path: Path, w: int, h: int):
-        with Image.open(path) as im:
+        from src.spotting_pixels import open_pixels
+
+        with open_pixels(path, draft=(w, h)) as im:
             # draft() lets the JPEG decoder skip most of the work when the
             # target is far smaller than the file, which it always is here: a
             # 6000 px plate shown at 600 px decodes in a fraction of the time.
-            try:
-                im.draft("RGB", (w, h))
-            except Exception:
-                pass
-            im.load()
             scale = min(w / im.width, h / im.height, 1.0)
             if scale < 1.0:
                 im = im.resize((max(1, int(im.width * scale)),
@@ -129,7 +126,7 @@ def unreadable_reason(path: Path) -> str:
             "JPEG previews are unavailable.\n\n"
             f"Running on:\n{sys.executable}\n\n"
             "If that is not the project environment, start the window with\n"
-            "run_experiment_designer.bat, which prefers it. Otherwise:\n"
+            "run_frogger.bat, which prefers it. Otherwise:\n"
             "    pip install -r requirements.txt"
         )
     try:

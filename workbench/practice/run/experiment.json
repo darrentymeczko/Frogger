@@ -1,0 +1,1729 @@
+{
+  "schema_version": 8,
+  "kind": "spotting_experiment_run",
+  "written": "2026-11-16T16:27:42",
+  "experiment": {
+    "schema_version": 8,
+    "kind": "spotting_experiment",
+    "id": "",
+    "revision": 2,
+    "name": "Practice run",
+    "template": {
+      "id": "e9f3f2d5-ac54-4241-99e7-1fc752bf1266",
+      "path": "",
+      "snapshot": {
+        "schema_version": 1,
+        "kind": "spotting_plate_template",
+        "id": "e9f3f2d5-ac54-4241-99e7-1fc752bf1266",
+        "revision": 1,
+        "name": "Practice plate",
+        "created": "2026-11-16",
+        "grid": {
+          "rows": 6,
+          "cols": 8
+        },
+        "sample_slots": 8,
+        "dilution": {
+          "levels": 3
+        },
+        "plate_slots": [
+          {
+            "id": "1",
+            "label": "Plate 1",
+            "control_slot": null,
+            "cells": [
+              [
+                "s1r1d0",
+                "s2r1d0",
+                "s3r1d0",
+                "s4r1d0",
+                "s5r1d0",
+                "s6r1d0",
+                "s7r1d0",
+                "s8r1d0"
+              ],
+              [
+                "s1r1d1",
+                "s2r1d1",
+                "s3r1d1",
+                "s4r1d1",
+                "s5r1d1",
+                "s6r1d1",
+                "s7r1d1",
+                "s8r1d1"
+              ],
+              [
+                "s1r1d2",
+                "s2r1d2",
+                "s3r1d2",
+                "s4r1d2",
+                "s5r1d2",
+                "s6r1d2",
+                "s7r1d2",
+                "s8r1d2"
+              ],
+              [
+                "s1r2d0",
+                "s2r2d0",
+                "s3r2d0",
+                "s4r2d0",
+                "s5r2d0",
+                "s6r2d0",
+                "s7r2d0",
+                "s8r2d0"
+              ],
+              [
+                "s1r2d1",
+                "s2r2d1",
+                "s3r2d1",
+                "s4r2d1",
+                "s5r2d1",
+                "s6r2d1",
+                "s7r2d1",
+                "s8r2d1"
+              ],
+              [
+                "s1r2d2",
+                "s2r2d2",
+                "s3r2d2",
+                "s4r2d2",
+                "s5r2d2",
+                "s6r2d2",
+                "s7r2d2",
+                "s8r2d2"
+              ]
+            ]
+          },
+          {
+            "id": "2",
+            "label": "Plate 2",
+            "control_slot": null,
+            "cells": [
+              [
+                "s1r3d0",
+                "s2r3d0",
+                "s3r3d0",
+                "s4r3d0",
+                "s5r3d0",
+                "s6r3d0",
+                "s7r3d0",
+                "s8r3d0"
+              ],
+              [
+                "s1r3d1",
+                "s2r3d1",
+                "s3r3d1",
+                "s4r3d1",
+                "s5r3d1",
+                "s6r3d1",
+                "s7r3d1",
+                "s8r3d1"
+              ],
+              [
+                "s1r3d2",
+                "s2r3d2",
+                "s3r3d2",
+                "s4r3d2",
+                "s5r3d2",
+                "s6r3d2",
+                "s7r3d2",
+                "s8r3d2"
+              ],
+              [
+                "s1r4d0",
+                "s2r4d0",
+                "s3r4d0",
+                "s4r4d0",
+                "s5r4d0",
+                "s6r4d0",
+                "s7r4d0",
+                "s8r4d0"
+              ],
+              [
+                "s1r4d1",
+                "s2r4d1",
+                "s3r4d1",
+                "s4r4d1",
+                "s5r4d1",
+                "s6r4d1",
+                "s7r4d1",
+                "s8r4d1"
+              ],
+              [
+                "s1r4d2",
+                "s2r4d2",
+                "s3r4d2",
+                "s4r4d2",
+                "s5r4d2",
+                "s6r4d2",
+                "s7r4d2",
+                "s8r4d2"
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    "mode": "timecourse",
+    "strains": [
+      "GLR1",
+      "SCH9",
+      "PRX1",
+      "WT 2",
+      "WT",
+      "ZWF1",
+      "RHO5",
+      "Tat-D"
+    ],
+    "control_slot": null,
+    "final_analysis": {
+      "normalization": {
+        "*": 5
+      },
+      "references": {
+        "*": [
+          "WT"
+        ]
+      },
+      "matching": {
+        "tokens": [
+          "WT",
+          "EV"
+        ],
+        "case_sensitive": false
+      },
+      "all_pairs": false
+    },
+    "categories": [
+      "Carbon source"
+    ],
+    "conditions": [
+      {
+        "code": "GLU",
+        "label": "Glucose",
+        "categories": {
+          "Carbon source": "Glucose"
+        }
+      },
+      {
+        "code": "GLY",
+        "label": "Glycerol",
+        "categories": {
+          "Carbon source": "Glycerol"
+        }
+      }
+    ],
+    "statistics": {
+      "test": "t_test",
+      "p_adjust": "none",
+      "alpha": 0.05,
+      "posthoc": "dunnett",
+      "extra_references": [],
+      "all_pairs": false
+    },
+    "multi_step": {
+      "enabled": false,
+      "scope": "technical",
+      "method": "two_step",
+      "dilution": null,
+      "hours": [],
+      "plate_ids": {},
+      "excluded_photos": {}
+    },
+    "output": "full",
+    "photos": {
+      "root": "{{PRACTICE_PHOTOS}}",
+      "experiment_top": "top",
+      "profile": {
+        "name": "Capture tree",
+        "rules": [
+          {
+            "facet": "timepoint",
+            "source": "segment",
+            "depth": -4,
+            "patterns": [
+              "(\\d+(?:\\.\\d+)?)\\s*h",
+              "^\\s*(\\d+(?:\\.\\d+)?)\\s*$"
+            ],
+            "transform": "hours"
+          },
+          {
+            "facet": "condition",
+            "source": "segment",
+            "depth": -3,
+            "patterns": [
+              "^(.+)$"
+            ],
+            "transform": "code"
+          },
+          {
+            "facet": "plate",
+            "source": "segment",
+            "depth": -2,
+            "patterns": [
+              "plate\\s*(\\d+)"
+            ],
+            "transform": "int"
+          }
+        ],
+        "aliases": {
+          "glucose": "GLU",
+          "glycerol": "GLY",
+          "potassium acetate": "K-OAc",
+          "k-oac": "K-OAc",
+          "koac": "K-OAc"
+        }
+      }
+    }
+  },
+  "controls": {
+    "GLU": 5,
+    "GLY": 5
+  },
+  "strains": [
+    "GLR1",
+    "SCH9",
+    "PRX1",
+    "WT 2",
+    "WT",
+    "ZWF1",
+    "RHO5",
+    "Tat-D"
+  ],
+  "pipeline_config": {
+    "measurement": {
+      "method": "centered-interior-v1",
+      "inward_margin": 0.15,
+      "min_pixels": 25
+    },
+    "strains": [
+      "GLR1",
+      "SCH9",
+      "PRX1",
+      "WT 2",
+      "WT",
+      "ZWF1",
+      "RHO5",
+      "Tat-D"
+    ],
+    "control_col": 5,
+    "final_analysis": {
+      "normalization": {
+        "*": 5
+      },
+      "references": {
+        "*": [
+          "WT"
+        ]
+      },
+      "matching": {
+        "tokens": [
+          "WT",
+          "EV"
+        ],
+        "case_sensitive": false
+      },
+      "all_pairs": false
+    },
+    "exclude": [],
+    "from_set": "",
+    "media": {
+      "GLU": {
+        "control_col": 5,
+        "exclude": []
+      },
+      "GLY": {
+        "control_col": 5,
+        "exclude": []
+      }
+    },
+    "resolved_photos": [
+      {
+        "relpath": "18 Hours/Glucose/Plate 1 (Rep 1+2)/_9.JPG",
+        "condition": "GLU",
+        "condition_label": "Glucose",
+        "timepoint": 18.0,
+        "timepoint_label": "18 Hours",
+        "plate": 1,
+        "shot": 1,
+        "strain_group": null
+      },
+      {
+        "relpath": "18 Hours/Glucose/Plate 2 (Rep 3+4)/_9.JPG",
+        "condition": "GLU",
+        "condition_label": "Glucose",
+        "timepoint": 18.0,
+        "timepoint_label": "18 Hours",
+        "plate": 2,
+        "shot": 1,
+        "strain_group": null
+      },
+      {
+        "relpath": "22 Hours/Glucose/Plate 1 (Rep 1+2)/_9.JPG",
+        "condition": "GLU",
+        "condition_label": "Glucose",
+        "timepoint": 22.0,
+        "timepoint_label": "22 Hours",
+        "plate": 1,
+        "shot": 1,
+        "strain_group": null
+      },
+      {
+        "relpath": "22 Hours/Glucose/Plate 2 (Rep 3+4)/_9.JPG",
+        "condition": "GLU",
+        "condition_label": "Glucose",
+        "timepoint": 22.0,
+        "timepoint_label": "22 Hours",
+        "plate": 2,
+        "shot": 1,
+        "strain_group": null
+      },
+      {
+        "relpath": "42 Hours/Glycerol/Plate 1 (Rep 1+2)/_9.JPG",
+        "condition": "GLY",
+        "condition_label": "Glycerol",
+        "timepoint": 42.0,
+        "timepoint_label": "42 Hours",
+        "plate": 1,
+        "shot": 1,
+        "strain_group": null
+      },
+      {
+        "relpath": "42 Hours/Glycerol/Plate 2 (Rep 3+4)/_9.JPG",
+        "condition": "GLY",
+        "condition_label": "Glycerol",
+        "timepoint": 42.0,
+        "timepoint_label": "42 Hours",
+        "plate": 2,
+        "shot": 1,
+        "strain_group": null
+      },
+      {
+        "relpath": "46 Hours/Glycerol/Plate 1 (Rep 1+2)/_9.JPG",
+        "condition": "GLY",
+        "condition_label": "Glycerol",
+        "timepoint": 46.0,
+        "timepoint_label": "46 Hours",
+        "plate": 1,
+        "shot": 1,
+        "strain_group": null
+      },
+      {
+        "relpath": "46 Hours/Glycerol/Plate 2 (Rep 3+4)/_9.JPG",
+        "condition": "GLY",
+        "condition_label": "Glycerol",
+        "timepoint": 46.0,
+        "timepoint_label": "46 Hours",
+        "plate": 2,
+        "shot": 1,
+        "strain_group": null
+      }
+    ],
+    "dilution_layout": {
+      "n_rows": 6,
+      "n_cols": 8,
+      "levels": [
+        {
+          "name": "level 1",
+          "plates": {
+            "1": [
+              [
+                0,
+                0,
+                1,
+                1
+              ],
+              [
+                0,
+                1,
+                2,
+                1
+              ],
+              [
+                0,
+                2,
+                3,
+                1
+              ],
+              [
+                0,
+                3,
+                4,
+                1
+              ],
+              [
+                0,
+                4,
+                5,
+                1
+              ],
+              [
+                0,
+                5,
+                6,
+                1
+              ],
+              [
+                0,
+                6,
+                7,
+                1
+              ],
+              [
+                0,
+                7,
+                8,
+                1
+              ],
+              [
+                3,
+                0,
+                1,
+                2
+              ],
+              [
+                3,
+                1,
+                2,
+                2
+              ],
+              [
+                3,
+                2,
+                3,
+                2
+              ],
+              [
+                3,
+                3,
+                4,
+                2
+              ],
+              [
+                3,
+                4,
+                5,
+                2
+              ],
+              [
+                3,
+                5,
+                6,
+                2
+              ],
+              [
+                3,
+                6,
+                7,
+                2
+              ],
+              [
+                3,
+                7,
+                8,
+                2
+              ]
+            ],
+            "2": [
+              [
+                0,
+                0,
+                1,
+                3
+              ],
+              [
+                0,
+                1,
+                2,
+                3
+              ],
+              [
+                0,
+                2,
+                3,
+                3
+              ],
+              [
+                0,
+                3,
+                4,
+                3
+              ],
+              [
+                0,
+                4,
+                5,
+                3
+              ],
+              [
+                0,
+                5,
+                6,
+                3
+              ],
+              [
+                0,
+                6,
+                7,
+                3
+              ],
+              [
+                0,
+                7,
+                8,
+                3
+              ],
+              [
+                3,
+                0,
+                1,
+                4
+              ],
+              [
+                3,
+                1,
+                2,
+                4
+              ],
+              [
+                3,
+                2,
+                3,
+                4
+              ],
+              [
+                3,
+                3,
+                4,
+                4
+              ],
+              [
+                3,
+                4,
+                5,
+                4
+              ],
+              [
+                3,
+                5,
+                6,
+                4
+              ],
+              [
+                3,
+                6,
+                7,
+                4
+              ],
+              [
+                3,
+                7,
+                8,
+                4
+              ]
+            ]
+          }
+        },
+        {
+          "name": "level 2",
+          "plates": {
+            "1": [
+              [
+                1,
+                0,
+                1,
+                1
+              ],
+              [
+                1,
+                1,
+                2,
+                1
+              ],
+              [
+                1,
+                2,
+                3,
+                1
+              ],
+              [
+                1,
+                3,
+                4,
+                1
+              ],
+              [
+                1,
+                4,
+                5,
+                1
+              ],
+              [
+                1,
+                5,
+                6,
+                1
+              ],
+              [
+                1,
+                6,
+                7,
+                1
+              ],
+              [
+                1,
+                7,
+                8,
+                1
+              ],
+              [
+                4,
+                0,
+                1,
+                2
+              ],
+              [
+                4,
+                1,
+                2,
+                2
+              ],
+              [
+                4,
+                2,
+                3,
+                2
+              ],
+              [
+                4,
+                3,
+                4,
+                2
+              ],
+              [
+                4,
+                4,
+                5,
+                2
+              ],
+              [
+                4,
+                5,
+                6,
+                2
+              ],
+              [
+                4,
+                6,
+                7,
+                2
+              ],
+              [
+                4,
+                7,
+                8,
+                2
+              ]
+            ],
+            "2": [
+              [
+                1,
+                0,
+                1,
+                3
+              ],
+              [
+                1,
+                1,
+                2,
+                3
+              ],
+              [
+                1,
+                2,
+                3,
+                3
+              ],
+              [
+                1,
+                3,
+                4,
+                3
+              ],
+              [
+                1,
+                4,
+                5,
+                3
+              ],
+              [
+                1,
+                5,
+                6,
+                3
+              ],
+              [
+                1,
+                6,
+                7,
+                3
+              ],
+              [
+                1,
+                7,
+                8,
+                3
+              ],
+              [
+                4,
+                0,
+                1,
+                4
+              ],
+              [
+                4,
+                1,
+                2,
+                4
+              ],
+              [
+                4,
+                2,
+                3,
+                4
+              ],
+              [
+                4,
+                3,
+                4,
+                4
+              ],
+              [
+                4,
+                4,
+                5,
+                4
+              ],
+              [
+                4,
+                5,
+                6,
+                4
+              ],
+              [
+                4,
+                6,
+                7,
+                4
+              ],
+              [
+                4,
+                7,
+                8,
+                4
+              ]
+            ]
+          }
+        },
+        {
+          "name": "level 3",
+          "plates": {
+            "1": [
+              [
+                2,
+                0,
+                1,
+                1
+              ],
+              [
+                2,
+                1,
+                2,
+                1
+              ],
+              [
+                2,
+                2,
+                3,
+                1
+              ],
+              [
+                2,
+                3,
+                4,
+                1
+              ],
+              [
+                2,
+                4,
+                5,
+                1
+              ],
+              [
+                2,
+                5,
+                6,
+                1
+              ],
+              [
+                2,
+                6,
+                7,
+                1
+              ],
+              [
+                2,
+                7,
+                8,
+                1
+              ],
+              [
+                5,
+                0,
+                1,
+                2
+              ],
+              [
+                5,
+                1,
+                2,
+                2
+              ],
+              [
+                5,
+                2,
+                3,
+                2
+              ],
+              [
+                5,
+                3,
+                4,
+                2
+              ],
+              [
+                5,
+                4,
+                5,
+                2
+              ],
+              [
+                5,
+                5,
+                6,
+                2
+              ],
+              [
+                5,
+                6,
+                7,
+                2
+              ],
+              [
+                5,
+                7,
+                8,
+                2
+              ]
+            ],
+            "2": [
+              [
+                2,
+                0,
+                1,
+                3
+              ],
+              [
+                2,
+                1,
+                2,
+                3
+              ],
+              [
+                2,
+                2,
+                3,
+                3
+              ],
+              [
+                2,
+                3,
+                4,
+                3
+              ],
+              [
+                2,
+                4,
+                5,
+                3
+              ],
+              [
+                2,
+                5,
+                6,
+                3
+              ],
+              [
+                2,
+                6,
+                7,
+                3
+              ],
+              [
+                2,
+                7,
+                8,
+                3
+              ],
+              [
+                5,
+                0,
+                1,
+                4
+              ],
+              [
+                5,
+                1,
+                2,
+                4
+              ],
+              [
+                5,
+                2,
+                3,
+                4
+              ],
+              [
+                5,
+                3,
+                4,
+                4
+              ],
+              [
+                5,
+                4,
+                5,
+                4
+              ],
+              [
+                5,
+                5,
+                6,
+                4
+              ],
+              [
+                5,
+                6,
+                7,
+                4
+              ],
+              [
+                5,
+                7,
+                8,
+                4
+              ]
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "dilution_layout": {
+    "n_rows": 6,
+    "n_cols": 8,
+    "levels": [
+      {
+        "name": "level 1",
+        "plates": {
+          "1": [
+            [
+              0,
+              0,
+              1,
+              1
+            ],
+            [
+              0,
+              1,
+              2,
+              1
+            ],
+            [
+              0,
+              2,
+              3,
+              1
+            ],
+            [
+              0,
+              3,
+              4,
+              1
+            ],
+            [
+              0,
+              4,
+              5,
+              1
+            ],
+            [
+              0,
+              5,
+              6,
+              1
+            ],
+            [
+              0,
+              6,
+              7,
+              1
+            ],
+            [
+              0,
+              7,
+              8,
+              1
+            ],
+            [
+              3,
+              0,
+              1,
+              2
+            ],
+            [
+              3,
+              1,
+              2,
+              2
+            ],
+            [
+              3,
+              2,
+              3,
+              2
+            ],
+            [
+              3,
+              3,
+              4,
+              2
+            ],
+            [
+              3,
+              4,
+              5,
+              2
+            ],
+            [
+              3,
+              5,
+              6,
+              2
+            ],
+            [
+              3,
+              6,
+              7,
+              2
+            ],
+            [
+              3,
+              7,
+              8,
+              2
+            ]
+          ],
+          "2": [
+            [
+              0,
+              0,
+              1,
+              3
+            ],
+            [
+              0,
+              1,
+              2,
+              3
+            ],
+            [
+              0,
+              2,
+              3,
+              3
+            ],
+            [
+              0,
+              3,
+              4,
+              3
+            ],
+            [
+              0,
+              4,
+              5,
+              3
+            ],
+            [
+              0,
+              5,
+              6,
+              3
+            ],
+            [
+              0,
+              6,
+              7,
+              3
+            ],
+            [
+              0,
+              7,
+              8,
+              3
+            ],
+            [
+              3,
+              0,
+              1,
+              4
+            ],
+            [
+              3,
+              1,
+              2,
+              4
+            ],
+            [
+              3,
+              2,
+              3,
+              4
+            ],
+            [
+              3,
+              3,
+              4,
+              4
+            ],
+            [
+              3,
+              4,
+              5,
+              4
+            ],
+            [
+              3,
+              5,
+              6,
+              4
+            ],
+            [
+              3,
+              6,
+              7,
+              4
+            ],
+            [
+              3,
+              7,
+              8,
+              4
+            ]
+          ]
+        }
+      },
+      {
+        "name": "level 2",
+        "plates": {
+          "1": [
+            [
+              1,
+              0,
+              1,
+              1
+            ],
+            [
+              1,
+              1,
+              2,
+              1
+            ],
+            [
+              1,
+              2,
+              3,
+              1
+            ],
+            [
+              1,
+              3,
+              4,
+              1
+            ],
+            [
+              1,
+              4,
+              5,
+              1
+            ],
+            [
+              1,
+              5,
+              6,
+              1
+            ],
+            [
+              1,
+              6,
+              7,
+              1
+            ],
+            [
+              1,
+              7,
+              8,
+              1
+            ],
+            [
+              4,
+              0,
+              1,
+              2
+            ],
+            [
+              4,
+              1,
+              2,
+              2
+            ],
+            [
+              4,
+              2,
+              3,
+              2
+            ],
+            [
+              4,
+              3,
+              4,
+              2
+            ],
+            [
+              4,
+              4,
+              5,
+              2
+            ],
+            [
+              4,
+              5,
+              6,
+              2
+            ],
+            [
+              4,
+              6,
+              7,
+              2
+            ],
+            [
+              4,
+              7,
+              8,
+              2
+            ]
+          ],
+          "2": [
+            [
+              1,
+              0,
+              1,
+              3
+            ],
+            [
+              1,
+              1,
+              2,
+              3
+            ],
+            [
+              1,
+              2,
+              3,
+              3
+            ],
+            [
+              1,
+              3,
+              4,
+              3
+            ],
+            [
+              1,
+              4,
+              5,
+              3
+            ],
+            [
+              1,
+              5,
+              6,
+              3
+            ],
+            [
+              1,
+              6,
+              7,
+              3
+            ],
+            [
+              1,
+              7,
+              8,
+              3
+            ],
+            [
+              4,
+              0,
+              1,
+              4
+            ],
+            [
+              4,
+              1,
+              2,
+              4
+            ],
+            [
+              4,
+              2,
+              3,
+              4
+            ],
+            [
+              4,
+              3,
+              4,
+              4
+            ],
+            [
+              4,
+              4,
+              5,
+              4
+            ],
+            [
+              4,
+              5,
+              6,
+              4
+            ],
+            [
+              4,
+              6,
+              7,
+              4
+            ],
+            [
+              4,
+              7,
+              8,
+              4
+            ]
+          ]
+        }
+      },
+      {
+        "name": "level 3",
+        "plates": {
+          "1": [
+            [
+              2,
+              0,
+              1,
+              1
+            ],
+            [
+              2,
+              1,
+              2,
+              1
+            ],
+            [
+              2,
+              2,
+              3,
+              1
+            ],
+            [
+              2,
+              3,
+              4,
+              1
+            ],
+            [
+              2,
+              4,
+              5,
+              1
+            ],
+            [
+              2,
+              5,
+              6,
+              1
+            ],
+            [
+              2,
+              6,
+              7,
+              1
+            ],
+            [
+              2,
+              7,
+              8,
+              1
+            ],
+            [
+              5,
+              0,
+              1,
+              2
+            ],
+            [
+              5,
+              1,
+              2,
+              2
+            ],
+            [
+              5,
+              2,
+              3,
+              2
+            ],
+            [
+              5,
+              3,
+              4,
+              2
+            ],
+            [
+              5,
+              4,
+              5,
+              2
+            ],
+            [
+              5,
+              5,
+              6,
+              2
+            ],
+            [
+              5,
+              6,
+              7,
+              2
+            ],
+            [
+              5,
+              7,
+              8,
+              2
+            ]
+          ],
+          "2": [
+            [
+              2,
+              0,
+              1,
+              3
+            ],
+            [
+              2,
+              1,
+              2,
+              3
+            ],
+            [
+              2,
+              2,
+              3,
+              3
+            ],
+            [
+              2,
+              3,
+              4,
+              3
+            ],
+            [
+              2,
+              4,
+              5,
+              3
+            ],
+            [
+              2,
+              5,
+              6,
+              3
+            ],
+            [
+              2,
+              6,
+              7,
+              3
+            ],
+            [
+              2,
+              7,
+              8,
+              3
+            ],
+            [
+              5,
+              0,
+              1,
+              4
+            ],
+            [
+              5,
+              1,
+              2,
+              4
+            ],
+            [
+              5,
+              2,
+              3,
+              4
+            ],
+            [
+              5,
+              3,
+              4,
+              4
+            ],
+            [
+              5,
+              4,
+              5,
+              4
+            ],
+            [
+              5,
+              5,
+              6,
+              4
+            ],
+            [
+              5,
+              6,
+              7,
+              4
+            ],
+            [
+              5,
+              7,
+              8,
+              4
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "photo_root": "{{PRACTICE_PHOTOS}}",
+  "photos": [
+    {
+      "relpath": "18 Hours/Glucose/Plate 1 (Rep 1+2)/_9.JPG",
+      "condition": "GLU",
+      "condition_label": "Glucose",
+      "timepoint": 18.0,
+      "timepoint_label": "18 Hours",
+      "plate": 1,
+      "shot": 1,
+      "strain_group": null
+    },
+    {
+      "relpath": "18 Hours/Glucose/Plate 2 (Rep 3+4)/_9.JPG",
+      "condition": "GLU",
+      "condition_label": "Glucose",
+      "timepoint": 18.0,
+      "timepoint_label": "18 Hours",
+      "plate": 2,
+      "shot": 1,
+      "strain_group": null
+    },
+    {
+      "relpath": "22 Hours/Glucose/Plate 1 (Rep 1+2)/_9.JPG",
+      "condition": "GLU",
+      "condition_label": "Glucose",
+      "timepoint": 22.0,
+      "timepoint_label": "22 Hours",
+      "plate": 1,
+      "shot": 1,
+      "strain_group": null
+    },
+    {
+      "relpath": "22 Hours/Glucose/Plate 2 (Rep 3+4)/_9.JPG",
+      "condition": "GLU",
+      "condition_label": "Glucose",
+      "timepoint": 22.0,
+      "timepoint_label": "22 Hours",
+      "plate": 2,
+      "shot": 1,
+      "strain_group": null
+    },
+    {
+      "relpath": "42 Hours/Glycerol/Plate 1 (Rep 1+2)/_9.JPG",
+      "condition": "GLY",
+      "condition_label": "Glycerol",
+      "timepoint": 42.0,
+      "timepoint_label": "42 Hours",
+      "plate": 1,
+      "shot": 1,
+      "strain_group": null
+    },
+    {
+      "relpath": "42 Hours/Glycerol/Plate 2 (Rep 3+4)/_9.JPG",
+      "condition": "GLY",
+      "condition_label": "Glycerol",
+      "timepoint": 42.0,
+      "timepoint_label": "42 Hours",
+      "plate": 2,
+      "shot": 1,
+      "strain_group": null
+    },
+    {
+      "relpath": "46 Hours/Glycerol/Plate 1 (Rep 1+2)/_9.JPG",
+      "condition": "GLY",
+      "condition_label": "Glycerol",
+      "timepoint": 46.0,
+      "timepoint_label": "46 Hours",
+      "plate": 1,
+      "shot": 1,
+      "strain_group": null
+    },
+    {
+      "relpath": "46 Hours/Glycerol/Plate 2 (Rep 3+4)/_9.JPG",
+      "condition": "GLY",
+      "condition_label": "Glycerol",
+      "timepoint": 46.0,
+      "timepoint_label": "46 Hours",
+      "plate": 2,
+      "shot": 1,
+      "strain_group": null
+    }
+  ],
+  "cache_key_version": "v27",
+  "data_review": {
+    "file": "",
+    "flags": null
+  }
+}

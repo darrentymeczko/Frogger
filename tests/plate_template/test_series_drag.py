@@ -8,6 +8,7 @@ so these run without a display.
 import pytest
 
 from plate_template.app import DesignerApp
+from plate_template.autofill import SeriesFillSpec, plan_series_fill
 from plate_template.model import EMPTY, Cell, DilutionSpec, Template
 
 
@@ -41,84 +42,198 @@ def test_line_reads_direction_and_span(anchor, current, direction, spanned):
     assert DesignerApp._line(anchor, current) == (direction, spanned)
 
 
-@pytest.mark.parametrize(
-    "spanned,spacing,levels",
-    [
-        (3, 1, 3),    # plain three-cell drag, three levels
-        (1, 1, 1),    # no movement -> too few levels to be a series
-        (5, 2, 3),    # the drag ends where the LAST level lands
-        (4, 2, 2),
-        (7, 3, 3),
-    ],
-)
-def test_levels_from_span_and_spacing(spanned, spacing, levels):
-    # Mirrors the expression in DesignerApp._plan_for_drag.
-    assert (spanned - 1) // spacing + 1 == levels
-
-
 # ---------------------------------------------------------------------------
-# The source run is found, not clicked
+# The source block is found, not clicked
 # ---------------------------------------------------------------------------
 
 
-def test_peer_run_picks_up_the_whole_row():
-    t = plate_with({(0, c): (c + 1, 1, 0) for c in range(8)})
-    plate = t.plate("1")
-    source = plate.get(0, 3).placement
-    run = DesignerApp._peer_run(plate, (0, 3), "down", source)
-    assert run == [(0, c) for c in range(8)]
+def block(plate, anchor):
+    return DesignerApp._source_block(plate, anchor, plate.get(*anchor).placement)
 
 
-def test_peer_run_stops_at_a_gap():
+def test_source_block_picks_up_the_whole_row():
+    plate = plate_with({(0, c): (c + 1, 1, 0) for c in range(8)}).plate("1")
+    assert block(plate, (0, 3)) == [(0, c) for c in range(8)]
+
+
+def test_source_block_stops_at_a_gap():
     spots = {(0, c): (c + 1, 1, 0) for c in range(8)}
     del spots[(0, 5)]
-    t = plate_with(spots)
-    plate = t.plate("1")
+    plate = plate_with(spots).plate("1")
     plate.set(0, 5, EMPTY)
-    source = plate.get(0, 3).placement
-    run = DesignerApp._peer_run(plate, (0, 3), "down", source)
-    assert run == [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]
+    assert block(plate, (0, 3)) == [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]
 
 
-def test_peer_run_stops_at_a_different_replicate():
+def test_source_block_spans_mixed_replicates():
     spots = {(0, c): (c + 1, 1, 0) for c in range(4)}
     spots.update({(0, c): (c + 1, 2, 0) for c in range(4, 8)})
     plate = plate_with(spots).plate("1")
-    source = plate.get(0, 1).placement
-    assert DesignerApp._peer_run(plate, (0, 1), "down", source) == [
-        (0, 0), (0, 1), (0, 2), (0, 3)
-    ]
+    assert block(plate, (0, 1)) == [(0, c) for c in range(8)]
 
 
-def test_peer_run_stops_at_a_different_dilution():
+def test_source_block_stops_at_a_different_dilution():
     spots = {(0, c): (c + 1, 1, 0) for c in range(8)}
     spots[(0, 6)] = (7, 1, 1)
     plate = plate_with(spots).plate("1")
-    source = plate.get(0, 2).placement
-    assert DesignerApp._peer_run(plate, (0, 2), "down", source) == [
-        (0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5)
-    ]
+    assert block(plate, (0, 2)) == [(0, c) for c in range(6)]
 
 
-def test_peer_run_scans_the_column_for_a_sideways_drag():
-    t = plate_with({(r, 0): (1, r + 1, 0) for r in range(3)})
-    plate = t.plate("1")
-    # Each row here is a different replicate, so only the anchor matches.
-    source = plate.get(1, 0).placement
-    assert DesignerApp._peer_run(plate, (1, 0), "right", source) == [(1, 0)]
-
-    t2 = plate_with({(r, 0): (1, 1, 0) for r in range(3)})
-    plate2 = t2.plate("1")
-    source2 = plate2.get(1, 0).placement
-    assert DesignerApp._peer_run(plate2, (1, 0), "right", source2) == [
-        (0, 0), (1, 0), (2, 0)
-    ]
-
-
-def test_peer_run_of_a_lone_spot_is_just_itself():
+def test_source_block_of_a_lone_spot_is_just_itself():
     plate = plate_with({(2, 2): (1, 1, 0)}).plate("1")
-    source = plate.get(2, 2).placement
-    assert DesignerApp._peer_run(plate, (2, 2), "down", source) == [(2, 2)]
+    assert block(plate, (2, 2)) == [(2, 2)]
+
+
+# The layout that prompted block drags: strain per column, three replicates
+# down each column, strains 2-4 spilling into the next column as reps 4-6.
+SCREENSHOT = {
+    (r, c): (slot, rep_base + r, 0)
+    for c, (slot, rep_base) in enumerate(
+        [(1, 1), (2, 1), (2, 4), (3, 1), (3, 4), (4, 1), (4, 4), (1, 4)]
+    )
+    for r in range(3)
+}
+
+
+def test_source_block_takes_the_whole_3x8_block():
+    plate = plate_with(SCREENSHOT).plate("1")
+    assert block(plate, (1, 4)) == sorted(SCREENSHOT)
+
+
+# ---------------------------------------------------------------------------
+# Direction, step and levels come from where the drag ends
+# ---------------------------------------------------------------------------
+
+
+ROW = [(0, c) for c in range(8)]
+BLOCK = sorted(SCREENSHOT)
+
+
+@pytest.mark.parametrize(
+    "cells,current,spacing,expected",
+    [
+        (ROW, (2, 3), 1, ("down", 1, 3)),      # plain three-cell drag
+        (ROW, (0, 3), 1, None),                # still on the source
+        (ROW, (4, 3), 2, ("down", 2, 3)),      # drag ends on the LAST level
+        (ROW, (3, 3), 2, ("down", 2, 2)),
+        (ROW, (6, 0), 3, ("down", 3, 3)),
+        ([(2, 0)], (0, 0), 1, ("up", 1, 3)),
+        ([(0, 0)], (0, 4), 1, ("right", 1, 5)),
+        ([(0, 0)], (3, 1), 1, ("down", 1, 4)),  # dominant axis wins
+        (BLOCK, (3, 0), 1, ("down", 3, 2)),    # first row of the next tile
+        (BLOCK, (5, 7), 1, ("down", 3, 2)),    # anywhere in that tile
+        (BLOCK, (6, 2), 1, ("down", 3, 3)),    # into a third tile
+        (BLOCK, (1, 5), 1, None),              # inside the block
+        ([(0, 0), (1, 0)], (5, 0), 2, ("down", 2, 3)),  # interleaved reps
+    ],
+)
+def test_block_drag(cells, current, spacing, expected):
+    assert DesignerApp._block_drag(cells, current, spacing) == expected
+
+
+def test_block_drag_copies_the_screenshot_layout_one_dilution_down():
+    t = plate_with(SCREENSHOT)
+    plate = t.plate("1")
+    sources = block(plate, (0, 0))
+    direction, step, levels = DesignerApp._block_drag(sources, (4, 0), 1)
+    plan = plan_series_fill(
+        t, "1", SeriesFillSpec(sources, direction, spacing=step, levels=levels)
+    )
+    assert not plan.issues
+    got = {(r, c): cell.placement for r, c, cell in plan.writes}
+    assert sorted(got) == [(r + 3, c) for r, c in BLOCK]
+    for (r, c), (slot, rep, dil) in SCREENSHOT.items():
+        p = got[(r + 3, c)]
+        assert (p.sample_slot, p.replicate, p.dilution) == (slot, rep, dil + 1)
+
+
+# ---------------------------------------------------------------------------
+# Selecting the sources before dragging them
+# ---------------------------------------------------------------------------
+
+
+def test_click_on_a_spot_selects_its_whole_block():
+    plate = plate_with(SCREENSHOT).plate("1")
+    assert DesignerApp._pick_sources(plate, (2, 6), (2, 6)) == set(SCREENSHOT)
+
+
+def test_click_on_a_blank_selects_nothing():
+    plate = plate_with(SCREENSHOT).plate("1")
+    assert DesignerApp._pick_sources(plate, (4, 0), (4, 0)) == set()
+
+
+def test_drag_selects_only_the_spots_in_its_rectangle():
+    plate = plate_with(SCREENSHOT).plate("1")
+    # Columns 2-3, rows 1 to 4: rows 3-4 are blank so only rows 1-2 count.
+    assert DesignerApp._pick_sources(plate, (4, 2), (1, 1)) == {
+        (1, 1), (1, 2), (2, 1), (2, 2)
+    }
+
+
+def test_partial_selection_tiles_by_its_own_height():
+    t = plate_with(SCREENSHOT)
+    plate = t.plate("1")
+    sources = sorted(DesignerApp._pick_sources(plate, (0, 0), (1, 1)))
+    direction, step, levels = DesignerApp._block_drag(sources, (2, 0), 1)
+    # Rows 0-1 are two high, so they step two rows: row 0 onto row 2, which
+    # is occupied and skipped with a warning, row 1 onto the free row 3.
+    assert (direction, step, levels) == ("down", 2, 2)
+    plan = plan_series_fill(
+        t, "1", SeriesFillSpec(sources, direction, spacing=step, levels=levels)
+    )
+    assert sorted(plan.cells) == [(3, 0), (3, 1)]
+    assert {i.code for i in plan.issues} == {"series_target_occupied"}
+
+
+class _Event:
+    def __init__(self, cell):
+        self.x, self.y = cell
+
+
+@pytest.fixture
+def canvas(tk_root):
+    from types import SimpleNamespace
+
+    from plate_template.gui.grid_canvas import GridCanvas
+
+    t = plate_with(SCREENSHOT)
+    c = GridCanvas(tk_root, SimpleNamespace(template=t), "1")
+    c.cell_at = lambda x, y: (x, y)  # events carry cells directly
+    c.select_provider = lambda a, b: DesignerApp._pick_sources(t.plate("1"), a, b)
+    c.edits = []
+    c.plan_provider = lambda a, b: ("plan", a, b)
+    c.commit_handler = c.edits.append
+    yield c
+    c.destroy()
+
+
+def gesture(canvas, *cells):
+    canvas._on_press(_Event(cells[0]))
+    for cell in cells[1:]:
+        canvas._on_drag(_Event(cell))
+    canvas._on_release(_Event(cells[-1]))
+
+
+def test_a_drag_outside_the_selection_selects_rather_than_edits(canvas):
+    gesture(canvas, (0, 0), (1, 1))
+    assert canvas.selection == {(0, 0), (0, 1), (1, 0), (1, 1)}
+    assert canvas.edits == []
+
+
+def test_a_drag_from_inside_the_selection_edits_and_spends_it(canvas):
+    gesture(canvas, (0, 0), (1, 1))
+    gesture(canvas, (1, 1), (3, 1))
+    assert canvas.edits == [("plan", (1, 1), (3, 1))]
+    assert canvas.selection == set()
+
+
+def test_clicking_a_blank_or_escape_clears_the_selection(canvas):
+    gesture(canvas, (0, 0))
+    assert canvas.selection == set(SCREENSHOT)
+    gesture(canvas, (5, 5))
+    assert canvas.selection == set()
+    gesture(canvas, (0, 0))
+    canvas.clear_selection()
+    assert canvas.selection == set()
 
 
 # ---------------------------------------------------------------------------

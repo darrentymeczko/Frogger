@@ -29,7 +29,7 @@ from .autofill import (
 from .gui.controller import EditorController
 from .gui.grid_canvas import GridCanvas
 from .gui.panels import InspectorBar, StatusBar, ValidationPanel
-from .gui.toolbar import TOOL_HINTS, ContextBar, Toolbar
+from .gui.toolbar import TOOLS, TOOL_HINTS, ContextBar, Toolbar
 from .model import Cell, CellKind, Template
 from .presets import blank, list_presets
 from .schema import TemplateError, load, save
@@ -60,9 +60,7 @@ Hover any toolbar button to see what it does.
      the number of levels, and the whole run of matching spots beside it comes
      along, so one drag dilutes a full row. Spacing sets the gap between levels.
 
-  4. Set control  [o]  -- click one spot. Its sample slot becomes this plate's
-     positive control. Every plate needs one, because each sample is
-     relativised to a control on its own plate.
+  Normalization is chosen later in the experiment's final Analysis tab.
 
   5. Add plate  [+]  for a second physical plate, or Duplicate  [=]  to copy
      this layout with the replicate numbers shifted up. Left and Right arrow
@@ -125,7 +123,8 @@ class DesignerApp:
         self.host.on_close(self._confirm_discard)
         # For the surrounding program's own toolbar, when there is one.
         for name, action in (("save", self.save_file), ("undo", self.undo),
-                             ("redo", self.redo)):
+                             ("redo", self.redo), ("save_as", self.save_file_as),
+                             ("rename", self.rename_template)):
             self.host.add_command(name, action)
 
     # -- construction --------------------------------------------------------
@@ -161,7 +160,8 @@ class DesignerApp:
             label="Open...", accelerator="Ctrl+O", command=self.open_file
         )
         file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.save_file)
-        file_menu.add_command(label="Save As...", command=self.save_file_as)
+        file_menu.add_command(label="Save As...", accelerator="Ctrl+Shift+S", command=self.save_file_as)
+        file_menu.add_command(label="Use layout in experiment", command=self.use_in_experiment)
         file_menu.add_separator()
         file_menu.add_command(label=self.host.close_label, command=self.host.close)
         self.file_menu = file_menu
@@ -173,6 +173,25 @@ class DesignerApp:
         edit_menu.add_command(label="Rename template...", command=self.rename_template)
         self.edit_menu = edit_menu
 
+        actions = self.host.add_menu("Plate")
+        shortcuts = [
+            ("Increase first slot", "<Control-Alt-s>", lambda: self.context.increase("first_slot")),
+            ("Increase replicate", "<Control-Alt-r>", lambda: self.context.increase("replicate")),
+            ("Increase dilution", "<Control-Alt-d>", lambda: self.context.increase("dilution")),
+            ("Grid size...", "<Control-Alt-g>", self.resize_grid),
+            ("Add plate", "<Control-Alt-n>", self.add_plate),
+            ("Duplicate plate", "<Control-Alt-c>", self.duplicate_plate),
+            ("Delete plate", "<Control-Alt-x>", self.delete_plate),
+            ("Rename plate...", "<F2>", self.rename_plate),
+        ]
+        for title, seq, action in shortcuts:
+            actions.add_command(label=title, accelerator=seq.strip("<>").replace("Control", "Ctrl").replace("-", "+"), command=action)
+            self.host.bind_key(seq, self._guarded(action))
+        for index, (key, _symbol, title, _hint) in enumerate(TOOLS, 1):
+            action = lambda k=key: self._select_tool(k)
+            actions.add_command(label=title, accelerator=f"Ctrl+Alt+{index}", command=action)
+            self.host.bind_key(f"<Control-Alt-Key-{index}>", self._guarded(action))
+
         view_menu = self.host.add_menu("View")
         view_menu.add_checkbutton(
             label="Show tokens", accelerator="Ctrl+T",
@@ -180,6 +199,8 @@ class DesignerApp:
         )
 
         help_menu = self.host.add_menu("Help")
+        from uikit.shortcuts import show_help
+        help_menu.add_command(label="Keyboard shortcuts", command=lambda: show_help(self.root))
         help_menu.add_command(label="Quick start", command=self.quick_start)
         help_menu.add_command(label="About", command=self._about)
 
@@ -190,6 +211,8 @@ class DesignerApp:
             ("<Control-n>", self.new_blank),
             ("<Control-o>", self.open_file),
             ("<Control-s>", self.save_file),
+            ("<Control-Shift-S>", self.save_file_as),
+            ("<F2>", self.rename_plate),
             ("<Control-t>", self._toggle_tokens),
             ("<Control-z>", self.undo),
             ("<Control-y>", self.redo),
@@ -199,13 +222,20 @@ class DesignerApp:
         ):
             self.host.bind_key(sequence, self._guarded(action))
 
+    def _select_tool(self, key):
+        self.tool.set(key)
+        self._on_tool_change()
+
     def _guarded(self, action):
         def handler(_event=None):
             widget = self.root.focus_get()
-            if (action not in (self.undo, self.redo, self.save_file)
-                    and isinstance(widget, (tk.Entry, ttk.Entry, ttk.Spinbox, ttk.Combobox))):
+            from uikit.shortcuts import editing
+            if (action not in (self.save_file, self.save_file_as) and editing(widget)):
                 return None
+            was_canvas = widget in self.canvases.values()
             action()
+            if was_canvas and self.current_plate_id() in self.canvases:
+                self.canvases[self.current_plate_id()].focus_set()
             return "break"
 
         return handler
@@ -213,6 +243,14 @@ class DesignerApp:
     def _build_body(self) -> None:
         outer = ttk.Frame(self.host.frame)
         outer.pack(fill="both", expand=True)
+
+        continuation = ttk.Frame(outer, padding=(8, 4))
+        continuation.pack(fill="x")
+        self.use_layout_button = ttk.Button(
+            continuation, text="Use layout in experiment", command=self.use_in_experiment)
+        self.use_layout_button.pack(side="left")
+        ttk.Label(continuation, text="Continue without saving a template file.").pack(
+            side="left", padx=10)
 
         self.status = StatusBar(outer)
         self.status.pack(side="bottom", fill="x")
@@ -261,6 +299,20 @@ class DesignerApp:
 
     # -- template lifecycle --------------------------------------------------
 
+    def use_in_experiment(self) -> None:
+        """Continue with an owned copy, including unsaved layout edits."""
+        from experiments.model import Experiment
+        from experiments.app import ExperimentApp
+        from .schema import to_dict
+
+        experiment = Experiment(
+            template_id=self.template.id,
+            template_path=str(self.path.resolve()) if self.path else "",
+            template_snapshot=to_dict(self.template),
+            strains=[None] * self.template.sample_slots())
+        if not self.host.open_document("experiment", None, experiment):
+            ExperimentApp(tk.Toplevel(self.root), experiment)
+
     def _load(self, template: Template, path: Path | None) -> None:
         if not self._confirm_discard():
             return
@@ -278,6 +330,7 @@ class DesignerApp:
         if wanted == list(self.canvases):
             return
         selected = self.current_plate_id()
+        restore_focus = self.root.focus_get() in self.canvases.values()
         for tab in self.notebook.tabs():
             frame = self.notebook.nametowidget(tab)
             self.notebook.forget(tab)
@@ -306,6 +359,8 @@ class DesignerApp:
         if selected in self.canvases:
             self.select_plate(selected)
         self._on_tool_change()
+        if restore_focus and self.current_plate_id() in self.canvases:
+            self.canvases[self.current_plate_id()].focus_set()
 
     def current_plate_id(self) -> str | None:
         current = self.notebook.select()
@@ -354,12 +409,19 @@ class DesignerApp:
         self.inspector.set_idle(TOOL_HINTS.get(self.tool.get(), ""))
         self.context.update_visibility()
         wants_click = self.tool.get() == "control"
+        wants_selection = self.tool.get() == "series"
         for canvas in self.canvases.values():
             canvas.click_handler = (
                 (lambda cell, pid=canvas.plate_id: self._set_control(pid, cell))
                 if wants_click
                 else None
             )
+            canvas.select_provider = (
+                (lambda a, b, pid=canvas.plate_id: self._select_for_drag(pid, a, b))
+                if wants_selection
+                else None
+            )
+            canvas.clear_selection()
 
     @staticmethod
     def _line(anchor, current) -> tuple[str, int]:
@@ -399,34 +461,88 @@ class DesignerApp:
         )
 
     @staticmethod
-    def _peer_run(plate, anchor, direction, source) -> list[tuple[int, int]]:
-        """The run of like spots lying across the drag, through the anchor.
+    def _source_block(plate, anchor, source) -> list[tuple[int, int]]:
+        """The block of spots at the anchor's dilution that touch it.
 
-        Dragging down from one spot in a row of eight sources should dilute all
-        eight, so the sources are found rather than clicked -- the contiguous
-        neighbours perpendicular to the drag that carry the same replicate and
-        dilution. The drag preview shows exactly which cells were picked up, so
-        this stays visible rather than implicit.
+        Dragging from one spot in a row of eight should dilute all eight, and
+        dragging from one spot of a 3x8 block -- whatever mix of samples and
+        replicates it holds -- should dilute the whole block, so the sources are
+        found rather than clicked: every spot connected to the anchor (edge to
+        edge) at the same dilution. Replicate is deliberately ignored, since a
+        block often interleaves them. The drag preview shows exactly which
+        cells were picked up, so this stays visible rather than implicit.
         """
-        step = (0, 1) if direction in ("down", "up") else (1, 0)
 
         def alike(rr: int, cc: int) -> bool:
             if not (0 <= rr < plate.rows and 0 <= cc < plate.cols):
                 return False
             other = plate.get(rr, cc).placement
-            return (
-                other is not None
-                and other.replicate == source.replicate
-                and other.dilution == source.dilution
-            )
+            return other is not None and other.dilution == source.dilution
 
-        cells = [anchor]
-        for sign in (1, -1):
-            rr, cc = anchor[0] + step[0] * sign, anchor[1] + step[1] * sign
-            while alike(rr, cc):
-                cells.append((rr, cc))
-                rr, cc = rr + step[0] * sign, cc + step[1] * sign
-        return sorted(cells)
+        seen = {anchor}
+        frontier = [anchor]
+        while frontier:
+            r, c = frontier.pop()
+            for nr, nc in ((r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)):
+                if (nr, nc) not in seen and alike(nr, nc):
+                    seen.add((nr, nc))
+                    frontier.append((nr, nc))
+        return sorted(seen)
+
+    @staticmethod
+    def _block_drag(
+        cells, current, spacing: int
+    ) -> tuple[str, int, int] | None:
+        """(direction, step, levels) for dragging a source block to `current`.
+
+        The direction is the side of the block the drag ends on, so a drag
+        anywhere below a 3x8 block means "down" however far it strays sideways.
+        Each level is stamped one whole block further on (or `spacing` cells,
+        if that is larger, to leave gaps), and the drag ends inside the tile
+        where the LAST level should land. None while still inside the block.
+        """
+        rows = [r for r, _ in cells]
+        cols = [c for _, c in cells]
+        r0, r1, c0, c1 = min(rows), max(rows), min(cols), max(cols)
+        r, c = current
+        beyond = {
+            "down": r - r1,
+            "up": r0 - r,
+            "right": c - c1,
+            "left": c0 - c,
+        }
+        direction = max(beyond, key=beyond.get)
+        if beyond[direction] <= 0:
+            return None
+        extent = r1 - r0 + 1 if direction in ("down", "up") else c1 - c0 + 1
+        step = max(spacing, extent)
+        # Distance from the block's starting edge (the top, for a downward
+        # drag) to the drag's end, so a one-row block keeps the rule "the drag
+        # ends on the last level".
+        reach = beyond[direction] + extent - 1
+        return direction, step, reach // step + 1
+
+    @classmethod
+    def _pick_sources(cls, plate, anchor, current) -> set[tuple[int, int]]:
+        """The spots a selecting drag picks up as dilution sources.
+
+        A click on a spot takes its whole block (see `_source_block`), the
+        usual case; a drag takes just the spots inside its rectangle, for when
+        only part of a block should be diluted. A click on a blank clears.
+        """
+        if anchor == current:
+            source = plate.get(*anchor).placement
+            if source is None:
+                return set()
+            return set(cls._source_block(plate, anchor, source))
+        return {
+            cell
+            for cell in cls._rectangle(anchor, current)
+            if plate.get(*cell).placement is not None
+        }
+
+    def _select_for_drag(self, plate_id, anchor, current) -> set[tuple[int, int]]:
+        return self._pick_sources(self.template.plate(plate_id), anchor, current)
 
     @staticmethod
     def _rectangle(anchor, current) -> list[tuple[int, int]]:
@@ -450,22 +566,27 @@ class DesignerApp:
                 )
             if tool == "series":
                 plate = self.template.plate(plate_id)
-                source = plate.get(*anchor).placement
-                if source is None:
+                # The canvas only routes a drag here once it starts inside the
+                # selection; an undo may since have removed some of its spots.
+                sources = sorted(
+                    cell
+                    for cell in self.canvases[plate_id].selection
+                    if plate.get(*cell).placement is not None
+                )
+                if not sources:
                     return None
-                direction, spanned = self._line(anchor, current)
-                spacing = max(1, self.context.spacing.get())
-                # The drag ends where the LAST dilution should land, so with a
-                # spacing of 2 a five-cell drag means three levels, not five.
-                levels = (spanned - 1) // spacing + 1
-                if levels < 2:
+                drag = self._block_drag(
+                    sources, current, max(1, self.context.spacing.get())
+                )
+                if drag is None:
                     return None
+                direction, step, levels = drag
                 return plan_series_fill(
                     self.template, plate_id,
                     SeriesFillSpec(
-                        sources=self._peer_run(plate, anchor, direction, source),
+                        sources=sources,
                         direction=direction,
-                        spacing=spacing,
+                        spacing=step,
                         levels=levels,
                     ),
                 )
@@ -708,8 +829,12 @@ class DesignerApp:
         )
         if not chosen:
             return False
+        previous = self.path
         self.path = Path(chosen)
-        return self.save_file()
+        if self.save_file():
+            return True
+        self.path = previous
+        return False
 
     # -- refresh -------------------------------------------------------------
 

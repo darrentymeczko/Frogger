@@ -30,7 +30,8 @@ from .model import Candidate
 
 #: Columns `sq.add_relative_growth` derives. Dropped before it is re-run, or the
 #: merge it does inside would collide with the previous run's copies.
-DERIVED = ("control_raw", "control_mean", "relative_growth", "control_ok")
+DERIVED = ("control_raw", "control_mean", "relative_growth", "control_ok",
+           "normalization_reason", "growth_quality")
 
 #: Columns this module adds on top of the pipeline's own. The plot renderer
 #: selects the columns it needs and ignores the rest, so the CSV stays readable
@@ -76,6 +77,7 @@ class Frame:
     control_col: int
     excluded_cols: list[int] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
+    plates: list = field(default_factory=list)  # measured geometry for ROI review
 
     @property
     def n_edited(self) -> int:
@@ -142,6 +144,30 @@ def layout_for(cfg: "dict | None"):
     return sb.DilutionLayout.from_dict(raw) if raw else None
 
 
+def level_names(cfg: "dict | None", cand: "Candidate | None" = None) -> list[str]:
+    """Dilution level names, least to most dilute.
+
+    With ``cand``, only the levels that have spots on the plates it
+    photographed -- the ones a rebuild of that candidate can measure. (Some
+    designs put each level on a plate of its own.)
+    """
+    import spotting_batch as sb
+
+    layout = layout_for(cfg) or sb.classic_layout()
+    if cand is None:
+        return [level.name for level in layout.levels]
+    plates = range(1, len([p for p in cand.photos if p])+1)
+    def on_photos(level):
+        for plate in plates:
+            try:
+                if level.cells(plate):
+                    return True
+            except KeyError:
+                continue
+        return False
+    return [level.name for level in layout.levels if on_photos(level)]
+
+
 def rows_for(cand: Candidate, cfg: "dict | None" = None):
     """This candidate's dilution level, looked up by name in the run's layout.
 
@@ -171,6 +197,11 @@ def pipeline_candidate(root: Path, cand: Candidate,
     display label and restore the condition identity recorded in the results.
     """
     import spotting_timecourse_figures as tcf
+    if cfg and cfg.get("_run_sources"):
+        from .runs import source_problems
+        problems = source_problems({"sources": cfg["_run_sources"]}, root)
+        if problems:
+            raise RebuildError("; ".join(problems) + ". Use Locate photos to relink originals.")
 
     row = {"medium": cand.medium, "timepoint": cand.timepoint,
            **{f"plate{k}": p for k, p in enumerate(cand.photos, start=1)}}
@@ -315,11 +346,7 @@ def _normalize(tidy, plates, control_col: int):
     tidy = tidy.drop(columns=[c for c in DERIVED if c in tidy.columns])
     keep = tidy[~tidy["excluded"].astype(bool)].copy()
     if keep.empty or not (keep["strain_col"] == control_col).any():
-        tidy["relative_growth"] = float("nan")
-        tidy["control_raw"] = float("nan")
-        tidy["control_mean"] = float("nan")
-        tidy["control_ok"] = False
-        return tidy, ["every control spot is excluded, so nothing can be "
+        return sq.unavailable_growth(tidy, "no_included_control"), ["every control spot is excluded, so nothing can be "
                       "normalised against it"]
 
     noise = max([sq.bg_noise(p.bg_samples) for p in plates] or [0.0])
@@ -333,6 +360,8 @@ def _normalize(tidy, plates, control_col: int):
     key_cols = ["experiment", "replicate", "strain_col"]
     added = [c for c in keep.columns if c not in tidy.columns]
     out = tidy.merge(keep[key_cols + added], on=key_cols, how="left")
+    out["control_ok"] = out["control_ok"].fillna(False).astype(bool)
+    out.loc[out["excluded"].astype(bool), "normalization_reason"] = "excluded_by_user"
     return out, [ln.strip(" !") for ln in buf.getvalue().splitlines()
                  if ln.strip()]
 
@@ -434,32 +463,42 @@ def rebuild(root: Path, label: str, cfg: dict, cand: Candidate,
     from . import PROJECT_ROOT
 
     cache_dir = Path(cache_dir or PROJECT_ROOT / ".spotting_cache")
-    cand_dict = pipeline_candidate(root, cand, cfg)
+    # A missing method is historical, never an implicit scientific upgrade.
+    from spotting_roi import settings_from_config
+    measurement = settings_from_config(cfg, legacy_if_missing=True)
+    cfg = {**cfg, "measurement": measurement.to_dict()}
+    label = cfg.get("_run_label") or label
     level = rows_for(cand, cfg)
     layout = layout_for(cfg)
     control_col, exclude = tc.medium_cfg(cfg, cand.medium)
-    experiment = tc._tc_experiment(cand_dict, label)
-
-    buf = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buf):
-            tidy = tc.build_tidy_for_candidate(cand_dict, level, cfg, cache_dir,
-                                               label, layout)
-            # lru_cached, so this is a dict lookup rather than a second read.
-            plates = [tc._cached_measure(s.path, s.plate,
-                                         level.quant_rows(s.plate), cache_dir,
-                                         layout)
-                      for s in tc.cand_shots(cand_dict)]
-    except Exception as e:
-        raise RebuildError(
-            f"could not measure {cand.plate1} + {cand.plate2}: "
-            f"{type(e).__name__}: {e}") from e
+    from . import measurements
+    archived = measurements.load(cfg, cand, root)
+    cand_dict = None
+    if archived is not None:
+        tidy, plates = archived
+        experiment = str(tidy["experiment"].iloc[0])
+        tidy["excluded"] = tidy["strain_col"].isin(exclude)
+        tidy["is_control"] = tidy["strain_col"].eq(control_col)
+    else:
+        cand_dict = pipeline_candidate(root, cand, cfg)
+        experiment = tc._tc_experiment(cand_dict, label)
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                tidy = tc.build_tidy_for_candidate(cand_dict, level, cfg, cache_dir,
+                                                   label, layout)
+                plates = tc.candidate_plates(cand_dict, level, cache_dir, layout, measurement)
+        except Exception as e:
+            raise RebuildError(
+                f"could not measure {cand.plate1} + {cand.plate2}: "
+                f"{type(e).__name__}: {e}") from e
     if tidy is None or tidy.empty:
         raise RebuildError(
             f"{experiment} produced no rows -- the strain panel in "
             f"timecourse_config.json may not match this plate.")
 
     messages: list[str] = []
+    measurements.save(cfg, cand, tidy, plates)
     tidy, unmatched = _apply_edits(tidy, edits or {}, control_col)
     for who in unmatched:
         messages.append(f"edit for {who} does not match any spot in this "
@@ -468,17 +507,21 @@ def rebuild(root: Path, label: str, cfg: dict, cand: Candidate,
     messages += notes
     tidy, notes = _flag_outliers(tidy, edits or {})
     messages += notes
+    if cand_dict is None:
+        cand_dict = {"plates": [tc.Shot(p.ref.path, cand.hours, cand.timepoint,
+                     cand.medium, cand.medium_label, p.ref.plate) for p in plates]}
     tidy = _mark_data_review(tidy, cand_dict, root, level, data_flags)
 
+    tidy["analysis_condition"] = cand.medium
     return Frame(medium=cand.medium, candidate=cand, experiment=experiment,
                  tidy=tidy, control_col=control_col,
-                 excluded_cols=list(exclude), messages=messages)
+                 excluded_cols=list(exclude), messages=messages, plates=plates)
 
 
 def summarize(frame: Frame, *, statistical_test: str = "t_test",
               p_adjust: str = "none", alpha: float = 0.05,
               posthoc: str = "none", extra_references=(),
-              all_pairs: bool = False, with_p: bool = True) -> list[dict]:
+              all_pairs: bool = False, with_p: bool = True, comparison_references=None) -> list[dict]:
     """Mean relative growth per strain, over the rows that actually count.
 
     The same rows `spotting_plots.py` keeps: not excluded, not an artifact, not
@@ -503,11 +546,11 @@ def summarize(frame: Frame, *, statistical_test: str = "t_test",
     # dropped -- excluding the control's rep1 sends the control to the bottom of
     # the list -- and a table that rearranges itself as you edit it is one you
     # cannot read a before-and-after off.
-    for col, g in t[use].groupby("strain_col", sort=True):
-        v = g["relative_growth"].astype(float)
+    for col, g in t.groupby("strain_col", sort=True):
+        v = g.loc[use.loc[g.index], "relative_growth"].astype(float)
         out.append({"strain": str(g["strain"].iloc[0]), "strain_col": int(col),
                     "n": int(len(v)), "mean": float(v.mean()),
-                    "sd": float(v.std()) if len(v) > 1 else 0.0})
+                    "sd": float(v.std()) if len(v) > 1 else float("nan")})
 
     # Use the plotting engine's statistical routines so the number beside a
     # strain is the same number used to annotate the graph. Ratio t-tests are
@@ -548,8 +591,10 @@ def summarize(frame: Frame, *, statistical_test: str = "t_test",
     values = spotting_plots.vs_control(
         group, control, statistical_test=statistical_test, p_adjust=p_adjust,
         posthoc=posthoc, extra_references=extra_references,
-        all_pairs=all_pairs)
+        all_pairs=all_pairs, comparison_references=comparison_references)
     for row in out:
+        if row["n"] == 0:
+            continue
         p_value = values.get(row["strain"], (None,))[0]
         row["p_value"] = p_value
         row["significant"] = (p_value is not None and p_value == p_value

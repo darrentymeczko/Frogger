@@ -267,6 +267,9 @@ def build_opts(meta: dict[str, str], overrides: dict[str, object] | None = None)
     typed into ImageJ, rather than by our guess at what the protocol meant.
     """
     opts = sq.MeasureOptions(
+        # Historical hand-ImageJ ground truth used fixed integer oval masks.
+        # Do not silently reinterpret that calibration with the interior method.
+        roi_method="fixed-oval-v23",
         rgb_mode="weighted" if _meta_bool(meta, "rgb_weighted") else "unweighted",
         ball_radius=_meta_float(meta, "rollingball_radius_px"),
         measure_diameter=_meta_float(meta, "measure_diameter_px"),

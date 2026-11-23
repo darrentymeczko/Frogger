@@ -38,10 +38,6 @@ An EXPERIMENT is one particular run of that assay: which strain was in each \
 slot, what it was grown on, and where its photographs are. It is also where \
 the photographs are measured -- Run quantification, on its last tab.
 
-REVIEW DATA is looking at those photographs before trusting any statistics: \
-flag a whole plate, or click single spots, that are not good data. The \
-additional multi-step analysis leaves them out; Review results marks them.
-
 REVIEW RESULTS then opens what a run produced: every candidate the time course \
 scored, so you can keep the pipeline's pick or choose another, and correct \
 individual spots."""
@@ -134,16 +130,17 @@ class HomePage(ttk.Frame):
         # a minimal request lets the parent's weighted grid stretch/map it.
         super().__init__(master, width=2, height=2)
         self.shell = shell
-        self.current = shell.settings.get("home_card", "experiment")
-        if self.current not in BY_KEY:
-            self.current = "experiment"
+        #: The selected step's key, or None. Home always opens with nothing
+        #: selected: which step you are on today is yours to say, not a
+        #: leftover from the last sitting.
+        self.current: str | None = None
 
         # A centred column of readable width, however wide the window is.
         self.column = ttk.Frame(self, padding=(px(self, 32), px(self, 28)))
         self.column.place(relx=0.5, y=0, anchor="n")
         self.bind("<Configure>", self._resize)
 
-        ttk.Label(self.column, text="Spotting Quantification",
+        ttk.Label(self.column, text="Frogger",
                   font=FONT_DISPLAY).pack(anchor="w")
         ttk.Label(self.column, style="Muted.TLabel",
                   text="Design a plate, describe the experiment and measure "
@@ -205,9 +202,9 @@ class HomePage(ttk.Frame):
 
     # -- the selected step -----------------------------------------------------------
 
-    def select(self, key: str) -> None:
-        self.current = key
-        self.shell.settings.set("home_card", key)
+    def select(self, key: str | None) -> None:
+        """Select a step's card; None selects none."""
+        self.current = key if key in BY_KEY else None
         for k, card in self.cards.items():
             card.selected = k == key
             card.paint()
@@ -262,6 +259,13 @@ class HomePage(ttk.Frame):
     def _fill_actions(self) -> None:
         for child in self.actions.winfo_children():
             child.destroy()
+        if self.current is None:
+            ttk.Label(self.actions, text="Where to start", font=FONT_STRONG).pack(
+                anchor="w", pady=(0, px(self, 6)))
+            ttk.Label(self.actions, style="Muted.TLabel", justify="left",
+                      text="Choose a step above to see how to start it.").pack(
+                anchor="w")
+            return
         kind = BY_KEY[self.current]
         ttk.Label(self.actions, text=kind.title, font=FONT_STRONG).pack(
             anchor="w", pady=(0, px(self, 6)))
@@ -275,16 +279,24 @@ class HomePage(ttk.Frame):
             child.destroy()
         ttk.Label(self.recent, text="Recent", font=FONT_STRONG).pack(
             anchor="w", pady=(0, px(self, 6)))
-        rows = self.shell.recent_files(self.current, RECENT_SHOWN)
+        if self.current is not None:
+            rows = [(self.current, path, when) for path, when in
+                    self.shell.recent_files(self.current, RECENT_SHOWN)]
+        else:
+            # No step chosen: what was opened most recently, of any kind.
+            rows = [(kind.key, path, when) for kind in KINDS
+                    for path, when in self.shell.settings.recent(kind.key)]
+            rows.sort(key=lambda r: r[2] or datetime.min, reverse=True)
+            rows = rows[:RECENT_SHOWN]
         if not rows:
             ttk.Label(self.recent, style="Muted.TLabel",
                       text="Nothing here yet.").pack(anchor="w")
             return
-        for path, when in rows:
+        for key, path, when in rows:
             row = ttk.Frame(self.recent)
             row.pack(fill="x", pady=px(self, 1))
-            LinkLabel(row, self.shell.display_name(self.current, path),
-                      lambda p=path: self.shell.open_document(self.current, p),
+            LinkLabel(row, self.shell.display_name(key, path),
+                      lambda k=key, p=path: self.shell.open_document(k, p),
                       foreground=t.TEXT).pack(side="left")
             ttk.Label(row, text=relative_time(when), style="Muted.TLabel").pack(
                 side="right")

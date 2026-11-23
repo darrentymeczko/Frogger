@@ -87,6 +87,20 @@ def test_rebuilding_the_pipelines_pick_reproduces_best(run):
         assert list(a.index) == list(b.index), (
             f"{frame.experiment}: different spots entirely")
 
+        # Task 1 retains these historical raw values but no longer presents a
+        # ratio for an ROI already declared unsuitable. All suitable ratios,
+        # denominators, raw measurements and flags must still match exactly.
+        unsuitable = a["artifact"].astype(bool)
+        assert a.loc[unsuitable, "relative_growth"].isna().all()
+        assert a.loc[unsuitable, "normalization_reason"].eq("unsuitable_measurement_roi").all()
+        b = b.copy()
+        b.loc[unsuitable, "relative_growth"] = float("nan")
+        # Older CSVs left the boolean blank for explicitly excluded rows.
+        # The review now records False rather than bool(NaN) becoming True.
+        excluded = a["excluded"].astype(bool)
+        assert not a.loc[excluded, "control_ok"].any()
+        b.loc[excluded, "control_ok"] = False
+
         for col in SHARED:
             if col in KEY or col not in b.columns:
                 continue

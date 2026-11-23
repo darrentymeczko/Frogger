@@ -48,18 +48,13 @@ def _print_issues(issues) -> int:
 
 def _load_template(e: Experiment, base: Path):
     """The bound plate template, or None. Never fatal -- validation reports it."""
-    if not e.template_path:
+    from plate_template.schema import TemplateError
+    from .layout import pin
+    try:
+        return pin(e, base)
+    except TemplateError as exc:
+        print(f"  ! template: {exc}")
         return None
-    from plate_template import schema as tschema
-
-    for candidate in (Path(e.template_path), base / e.template_path):
-        if candidate.exists():
-            try:
-                return tschema.load(candidate)
-            except tschema.TemplateError as exc:
-                print(f"  ! template: {exc}")
-                return None
-    return None
 
 
 # ---------------------------------------------------------------------------

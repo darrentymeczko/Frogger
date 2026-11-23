@@ -116,7 +116,6 @@ def build(pairs: list, out_path: Path, note=None) -> Path:
     """
     from pptx import Presentation
     from pptx.util import Inches
-    from PIL import Image
 
     pres = Presentation()
     pres.slide_width = Inches(SLIDE_W_IN)
@@ -127,11 +126,7 @@ def build(pairs: list, out_path: Path, note=None) -> Path:
         slide = pres.slides.add_slide(blank)
         for path, box_x, box_w in ((mont, 0.0, LEFT_W_IN),
                                    (graph, RIGHT_X_IN, RIGHT_W_IN)):
-            with Image.open(path) as im:
-                iw, ih = im.size
-            x, y, w, h = _fit(iw, ih, box_x, box_w)
-            slide.shapes.add_picture(str(path), Inches(x), Inches(y),
-                                     Inches(w), Inches(h))
+            _add_picture(slide, path, box_x, box_w)
         # Not shown on the slide -- the example carries no text -- but it makes
         # the deck navigable and searchable.
         slide.notes_slide.notes_text_frame.text = (
@@ -152,7 +147,6 @@ def build_slides(slides: list, out_path: Path) -> Path:
     """
     from pptx import Presentation
     from pptx.util import Inches
-    from PIL import Image
 
     pres = Presentation()
     pres.slide_width = Inches(SLIDE_W_IN)
@@ -164,16 +158,31 @@ def build_slides(slides: list, out_path: Path) -> Path:
         boxes = (((0.0, SLIDE_W_IN),) if len(pictures) == 1
                  else ((0.0, LEFT_W_IN), (RIGHT_X_IN, RIGHT_W_IN)))
         for path, (box_x, box_w) in zip(pictures, boxes):
-            with Image.open(path) as im:
-                iw, ih = im.size
-            x, y, w, h = _fit(iw, ih, box_x, box_w)
-            slide.shapes.add_picture(str(path), Inches(x), Inches(y),
-                                     Inches(w), Inches(h))
+            _add_picture(slide, path, box_x, box_w)
         slide.notes_slide.notes_text_frame.text = note
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pres.save(str(out_path))
     return out_path
+
+
+def _add_picture(slide, path, box_x, box_w):
+    """Embed the reviewed pixels, with no viewer-dependent EXIF transform.
+
+    Office can interpret the orientation on embedded originals differently
+    from Pillow. A lossless PNG with no orientation metadata fixes that at the
+    boundary, without changing source files or flipping the scientific image.
+    """
+    from io import BytesIO
+    from pptx.util import Inches
+    from spotting_pixels import open_pixels
+
+    with open_pixels(path) as im:
+        x, y, w, h = _fit(im.width, im.height, box_x, box_w)
+        stream = BytesIO()
+        im.save(stream, format="PNG")
+    stream.seek(0)
+    slide.shapes.add_picture(stream, Inches(x), Inches(y), Inches(w), Inches(h))
 
 
 def main(argv=None) -> int:

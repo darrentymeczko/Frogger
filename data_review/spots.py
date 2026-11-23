@@ -84,6 +84,10 @@ class Detected:
     #: True when some cell's own dilution level was not in the cache entry and
     #: its value is from another level's ROI instead.
     approximate: bool = False
+    boundary: dict = field(default_factory=dict)
+    quality: dict = field(default_factory=dict)
+    boxes: dict = field(default_factory=dict)
+    method: str = "fixed-oval-v23"
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -143,6 +147,9 @@ def load(path: Path, layout, plate: int) -> "Detected | None":
     found = Detected(centers=np.asarray(data["centers"], float),
                      plate_center=tuple(float(v) for v in data.get("plate_center", (0, 0))),
                      plate_radius=float(data.get("plate_radius", 0.0)))
+    if "measurement_settings" in data:
+        import json
+        found.method = json.loads(str(data["measurement_settings"]))["method"]
     rowsets = sorted({k[:-len("_net")] for k in data if k.endswith("_net")})
     if not rowsets:
         return None
@@ -150,6 +157,10 @@ def load(path: Path, layout, plate: int) -> "Detected | None":
     def take(key: str, r: int, c: int) -> None:
         found.net[(r, c)] = float(data[f"{key}_net"][r, c])
         found.radius[(r, c)] = float(data[f"{key}_radius"])
+        for field_name, suffix in (("boundary", "boundary_radii"),
+                                   ("quality", "quality"), ("boxes", "roi_boxes")):
+            if f"{key}_{suffix}" in data:
+                getattr(found, field_name)[(r, c)] = data[f"{key}_{suffix}"][r, c]
         if bool(data[f"{key}_rim"][r, c]):
             found.rim.add((r, c))
 

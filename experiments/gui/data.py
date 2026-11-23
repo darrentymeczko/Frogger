@@ -7,9 +7,11 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from uikit import tokens
+from uikit.theme import FONT_STRONG
 
-from ..profiles import FACETS, FacetRule, NamingProfile
+from ..profiles import FACETS, FacetRule, NamingProfile, apply_keywords
 from .conditions import _ask_text
+from .order import order_summary
 from .organization import example_text, reading_choices
 
 _SOURCES = {
@@ -21,6 +23,7 @@ _SOURCES = {
 }
 _TRANSFORMS = {"condition": "code", "plate": "int", "timepoint": "hours", "set": "raw"}
 _MULTIPLE_GROUPS = "Multiple strain groups - assign photos below"
+_BY_ORDER = "By position in each folder (photo order)"
 
 
 class DataPanel(ttk.Frame):
@@ -30,14 +33,61 @@ class DataPanel(ttk.Frame):
         bar = ttk.Frame(self)
         bar.pack(fill="x")
         ttk.Button(bar, text="Choose data folder...", command=choose_folder).pack(side="left")
-        ttk.Button(bar, text="Detect organization", command=self._detect).pack(side="left", padx=6)
-        ttk.Button(bar, text="Add detected conditions", command=self._adopt).pack(side="left")
+        from uikit.data_organization import show_data_organization
+        ttk.Button(bar, text="Photo organization guide",
+                   command=lambda: show_data_organization(self)).pack(side="left", padx=6)
         self.summary = ttk.Label(self, text="", justify="left", foreground=tokens.TEXT_MUTED, wraplength=850)
         self.summary.pack(fill="x", pady=6)
         self.bind("<Configure>", lambda e: self.summary.configure(wraplength=max(240, e.width - 24)))
 
+        # The three ways a photo gets its treatment / plate / hours / group, in
+        # the order a user should try them. Each later one beats the earlier.
+        how = self.how = ttk.LabelFrame(self, text="How each photo is identified", padding=8)
+        how.pack(fill="x", pady=(0, 6))
+        how.columnconfigure(1, weight=1)
+        # Centred, not top-anchored: its text is centred on the button beside it.
+        ttk.Label(how, text="1", font=FONT_STRONG).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        detected = ttk.Frame(how)
+        detected.grid(row=0, column=1, sticky="ew")
+        # Button first so the text, not the button, gives way in a narrow window.
+        ttk.Button(detected, text="Detect again", command=self._detect).pack(side="right")
+        ttk.Label(detected, text="Read from names automatically:").pack(side="left")
+        # One line, however long: a wrapped summary pushed the photo list down.
+        self.interpretation = ttk.Label(detected, foreground=tokens.TEXT_MUTED)
+        self.interpretation.pack(side="left", padx=6)
+
+        ttk.Label(how, text="2", font=FONT_STRONG).grid(row=1, column=0, sticky="nw", padx=(0, 8), pady=(8, 0))
+        keywords = ttk.Frame(how)
+        keywords.grid(row=1, column=1, sticky="ew", pady=(8, 0))
+        # Buttons first, so a narrow window shortens the text, not the buttons.
+        # Photo order is for folders whose photos say nothing but are always
+        # taken in the same order: set A plate 1, set A plate 2, set B plate 1, ...
+        keywords.columnconfigure(0, weight=1)
+        keyword_buttons = ttk.Frame(keywords)
+        keyword_buttons.grid(row=0, column=1, rowspan=2, sticky="ne", padx=(6, 0))
+        ttk.Button(keyword_buttons, text="Photo order in each folder...",
+                   command=self._edit_order).pack(side="right")
+        ttk.Button(keyword_buttons, text="Keyword rules...", command=self._edit_keywords).pack(side="right", padx=(0, 6))
+        keyword_text = ttk.Label(keywords, justify="left", text=(
+            "Keyword rules: a word in a name means a treatment, plate, hours or strain group."))
+        keyword_text.grid(row=0, column=0, sticky="w")
+        self.keyword_summary = ttk.Label(keywords, foreground=tokens.TEXT_MUTED)
+        self.keyword_summary.grid(row=1, column=0, sticky="w")
+        scale = max(1.0, self.winfo_fpixels("1i") / 96)
+        ttk.Style().configure("Data.Treeview", rowheight=int(24 * scale))
+
+        ttk.Label(how, text="3", font=FONT_STRONG).grid(row=2, column=0, sticky="nw", padx=(0, 8), pady=(8, 0))
+        by_hand = ttk.Label(how, justify="left", text=(
+            "Still wrong for some photos? Select them below and press Treatment, Plate, Hours or "
+            "Strain group; hand assignments win over everything."))
+        by_hand.grid(row=2, column=1, sticky="w", pady=(8, 0))
+        how.bind("<Configure>", lambda ev: [
+            keyword_text.configure(wraplength=max(240, ev.width - keyword_buttons.winfo_reqwidth() - int(60 * scale))),
+            by_hand.configure(wraplength=max(300, ev.width - 60))])
+        self.organization_button = ttk.Button(how, text="Advanced: choose where each detail is written...",
+                                              command=self._toggle_organization)
+        self.organization_button.grid(row=3, column=1, sticky="w", pady=(8, 0))
         self.organization = ttk.LabelFrame(self, text="Where is each detail written?", padding=8)
-        self.organization.pack(fill="x")
         ttk.Label(self.organization, text="Choose how to read each detail. Each choice includes where to look; check the examples below it.",
                   foreground=tokens.TEXT_MUTED).pack(anchor="w", pady=(0, 6))
         simple = ttk.Frame(self.organization)
@@ -64,7 +114,7 @@ class DataPanel(ttk.Frame):
         actions = ttk.Frame(self.organization)
         actions.pack(fill="x")
         ttk.Button(actions, text="Use these choices", command=self._apply_choices).pack(side="left")
-        ttk.Label(actions, text="Updates the photo list below; individual corrections are kept.",
+        ttk.Label(actions, text="Updates the photo list below; keyword rules and individual corrections are kept.",
                   foreground=tokens.TEXT_MUTED).pack(side="left", padx=8)
         self.advanced_button = ttk.Button(self.organization, text="Show advanced pattern editor",
                                          command=self._toggle_advanced)
@@ -86,13 +136,24 @@ class DataPanel(ttk.Frame):
         ttk.Label(settings, text="Level: 0 = first folder below the root; -2 = photo's parent folder; -3 = its parent. Separate alternative patterns with ;;").grid(row=5, column=0, columnspan=4, sticky="w", pady=(5, 0))
         ttk.Button(settings, text="Apply organization", command=self._apply).grid(row=1, column=4, rowspan=2, padx=6)
 
-        controls = ttk.Frame(self)
-        controls.pack(fill="x", pady=6)
-        ttk.Label(controls, text="Correct selected photos:").pack(side="left")
+        self.review_bar = ttk.Frame(self)
+        self.review_bar.pack(fill="x", pady=6)
+        self.filter = tk.StringVar(value="All photos")
+        for label in ("All photos", "Needs attention", "Manually edited", "Ignored"):
+            ttk.Radiobutton(self.review_bar, text=label, value=label, variable=self.filter,
+                            command=self.refresh).pack(side="left", padx=(0, 8))
+        ttk.Label(self.review_bar, text="Find:").pack(side="left")
+        self.search = tk.StringVar()
+        ttk.Entry(self.review_bar, textvariable=self.search, width=24).pack(side="left", fill="x", expand=True, padx=6)
+        self.search.trace_add("write", lambda *_: self.refresh())
+        controls = self.selection_controls = ttk.Frame(self)
+        self.selection_label = ttk.Label(controls)
+        self.selection_label.pack(side="left")
         for facet, title in (("condition", "Condition"), ("plate", "Plate"), ("timepoint", "Hours"), ("set", "Strain group")):
             ttk.Button(controls, text=title, command=lambda f=facet: self._correct(f)).pack(side="left", padx=2)
         ttk.Button(controls, text="Ignore", command=lambda: self._ignore(True)).pack(side="left", padx=2)
         ttk.Button(controls, text="Include", command=lambda: self._ignore(False)).pack(side="left", padx=2)
+        ttk.Button(controls, text="Reset assignments", command=self._reset_assignments).pack(side="left", padx=6)
         from .groups import add_group
         ttk.Button(controls, text="Add strain group...",
                    command=lambda: add_group(self, self.ctl, self.on_change)).pack(side="right")
@@ -105,8 +166,6 @@ class DataPanel(ttk.Frame):
         area.rowconfigure(0, weight=1)
         area.columnconfigure(0, weight=1)
         columns = ("path", "label", "plate", "hours", "set", "status")
-        scale = max(1.0, self.winfo_fpixels("1i") / 96)
-        ttk.Style().configure("Data.Treeview", rowheight=int(24 * scale))
         self.table = ttk.Treeview(area, columns=columns, show="headings",
                                  selectmode="extended", style="Data.Treeview")
         for key, width, title in zip(columns, (330, 250, 55, 65, 55, 200),
@@ -119,6 +178,11 @@ class DataPanel(ttk.Frame):
         self.table.grid(row=0, column=0, sticky="nsew")
         scroll.grid(row=0, column=1, sticky="ns")
         horizontal.grid(row=1, column=0, sticky="ew")
+        self.details = ttk.Label(self, text="Select photos to edit them together. Double-click a value to correct it.",
+                                 foreground=tokens.TEXT_MUTED, wraplength=1000, justify="left")
+        self.details.pack(fill="x", pady=(6, 0))
+        self.table.bind("<<TreeviewSelect>>", self._selection_changed)
+        self.table.bind("<Double-1>", self._edit_cell)
         self._profile = None
         self._files_signature = None
 
@@ -130,9 +194,110 @@ class DataPanel(ttk.Frame):
             self.advanced.pack(fill="x", pady=(6, 0))
             self.advanced_button.configure(text="Hide advanced pattern editor")
 
+    def _toggle_organization(self):
+        if self.organization.winfo_manager():
+            self.organization.pack_forget()
+            self.organization_button.configure(text="Advanced: choose where each detail is written...")
+        else:
+            self.organization.pack(fill="x", before=self.review_bar)
+            self.organization_button.configure(text="Hide advanced settings")
+
+    # -- keyword rules ---------------------------------------------------------
+
+    def _edit_keywords(self):
+        from .keywords import edit_keywords
+        # Start from the search box: a user who has just filtered the list to
+        # "Gluc" is one click from making that the rule.
+        edit_keywords(self, self.ctl, self.on_change, text=self.search.get().strip())
+
+    def _refresh_keywords(self):
+        rules = self.ctl.experiment.keywords
+        if not rules:
+            text = "none yet"
+        else:
+            caught = sum(any(k.matches(f.parts) for k in rules) for f in self.ctl.files)
+            text = f"{len(rules)} rule{'s' if len(rules) != 1 else ''}, {caught} photo{'s' if caught != 1 else ''} matched"
+        self.keyword_summary.configure(text=text)
+
+    def _edit_cell(self, event):
+        path = self.table.identify_row(event.y)
+        facet = {"#2": "condition", "#3": "plate", "#4": "timepoint", "#5": "set"}.get(
+            self.table.identify_column(event.x))
+        if path and facet:
+            self.table.selection_set(path)
+            self._correct(facet)
+
+    def _reset_assignments(self):
+        paths = self.table.selection()
+        if not paths:
+            return
+        with self.ctl.transaction("Reset photo assignments"):
+            for facet in ("condition", "condition_label", "plate", "timepoint", "set"):
+                self.ctl.override_many(paths, facet, "")
+        self.on_change()
+
+    def _selection_changed(self, _event=None):
+        paths = self.table.selection()
+        self.selection_label.configure(text=f"{len(paths)} selected:")
+        if paths:
+            self.selection_controls.pack(fill="x", pady=6, before=self.group_summary)
+        else:
+            self.selection_controls.pack_forget()
+        if len(paths) == 1:
+            row = next((r for r in self.ctl.resolution.rows if r.relpath == paths[0]), None)
+            if row is not None:
+                e = self.ctl.experiment
+                sources = []
+                for facet, title, value in (("condition", "Treatment", row.condition),
+                                           ("plate", "Plate", row.plate),
+                                           ("timepoint", "Hours", row.timepoint),
+                                           ("set", "Strain group", row.set_key)):
+                    rule = e.profile.rule_for(facet)
+                    keyword = apply_keywords(tuple(row.relpath.split("/")), e.keywords).get(facet)
+                    if value is None:
+                        source = "unassigned"
+                    elif facet in e.overrides.get(row.relpath, {}):
+                        source = "manual assignment"
+                    elif keyword is not None:
+                        source = "keyword rule"
+                    elif facet in e.order_facets():
+                        source = "photo order"
+                    elif rule:
+                        source = {"stem": "filename", "segment": "folder/path rule",
+                                  "path": "relative path", "treatment": "treatment detection"}.get(rule.source, rule.source)
+                    else:
+                        source = "experiment default"
+                    sources.append(f"{title}: {source}")
+                self.details.configure(text=row.relpath + "\n" + " · ".join(sources))
+                return
+        self.details.configure(text=("Edits apply to every selected photo. Reset assignments returns them to the automatic rules."
+                                     if paths else "Select photos to edit them together. Double-click a value to correct it."))
+
+    def _matches_filter(self, row):
+        choice = self.filter.get()
+        if choice == "Needs attention" and not (row.status == "unresolved" or (row.cloud_only and row.status != "ignored")):
+            return False
+        if choice == "Manually edited" and not self.ctl.experiment.overrides.get(row.relpath):
+            return False
+        if choice == "Ignored" and row.status != "ignored":
+            return False
+        query = self.search.get().strip().casefold()
+        return not query or query in " ".join((row.relpath, row.condition_label or "", row.set_key or "",
+                                               self.ctl.condition_name(row.condition) if row.condition else "")).casefold()
+
     def _refresh_choices(self):
+        by_order = self.ctl.experiment.order_facets()
         for facet, fields in self.simple_rules.items():
             current = self.ctl.experiment.profile.rule_for(facet)
+            if facet in by_order:
+                # The photo order is the authority; keep the shadowed rule as
+                # it is, so stopping the order brings the old reading back.
+                fields["choices"] = {_BY_ORDER: current}
+                fields["choice_box"].configure(values=[_BY_ORDER], state="disabled")
+                fields["selected"].set(_BY_ORDER)
+                self._preview_choice(facet)
+                continue
+            fields["choice_box"].configure(state="readonly")
             choices = reading_choices(self.ctl.files, facet, current,
                                       self.ctl.experiment.profile.aliases)
             if facet == "set":
@@ -152,11 +317,19 @@ class DataPanel(ttk.Frame):
 
     def _preview_choice(self, facet):
         fields = self.simple_rules[facet]
+        if fields["selected"].get() == _BY_ORDER:
+            fields["example"].configure(
+                text=order_summary(self.ctl.experiment, self.ctl.resolution)
+                if facet == "plate" else "Read with the plate number, from the photo order above.")
+            return
         if facet == "set" and fields["selected"].get() == _MULTIPLE_GROUPS:
             fields["example"].configure(text="Define each group on Panel, then select photos below and click Strain group to assign them.")
             return
-        fields["example"].configure(text=example_text(
-            self.ctl.files, self._choice_rule(facet), self.ctl.experiment.profile.aliases))
+        text = example_text(self.ctl.files, self._choice_rule(facet),
+                            self.ctl.experiment.profile.aliases)
+        if facet == "plate" and self._choice_rule(facet) is None and self.ctl.files:
+            text += " If every folder's photos are taken in the same order, use Photo order in each folder."
+        fields["example"].configure(text=text)
 
     def _apply_choices(self):
         with self.ctl.transaction("Change data organization"):
@@ -181,11 +354,18 @@ class DataPanel(ttk.Frame):
     def refresh(self):
         from ..profiles import profile_to_dict
         profile = self.ctl.experiment.profile
-        signature = {**profile_to_dict(profile), "groups": list(self.ctl.experiment.strain_groups)}
+        signature = {**profile_to_dict(profile), "groups": list(self.ctl.experiment.strain_groups),
+                     "order": list(self.ctl.experiment.photo_order),
+                     "keywords": list(self.ctl.experiment.keywords)}
+        self._refresh_keywords()
         files_signature = tuple(f.relpath for f in self.ctl.files)
         if signature != self._profile or files_signature != self._files_signature:
             self._refresh_choices()
             self._files_signature = files_signature
+        elif self.ctl.experiment.photo_order:
+            # Ignoring a photo can make a folder fit the order again.
+            for facet in self.ctl.experiment.order_facets():
+                self._preview_choice(facet)
         if signature != self._profile:
             self._profile = signature
             for facet, (source, depth, pattern) in self.rules.items():
@@ -197,8 +377,19 @@ class DataPanel(ttk.Frame):
         y = self.table.yview()[0]
         self.table.delete(*self.table.get_children())
         rows = self.ctl.resolution.rows if self.ctl.resolution else []
-        for row in rows:
+        # Listed as Explorer lists them (IMG_9 before IMG_10), which is also
+        # the order a photo order counts positions in.
+        from ..intake import _natural_key
+        for row in sorted(rows, key=lambda r: (_natural_key(r.relpath), r.relpath)):
+            if not self._matches_filter(row):
+                continue
             status = ", ".join(f"needs {v}" for v in row.missing) if row.status == "unresolved" else row.status
+            if status == "ok":
+                status = "Assigned"
+            if self.ctl.experiment.overrides.get(row.relpath):
+                status += "; manually edited"
+            if row.note:
+                status += f" ({row.note})"
             if row.cloud_only:
                 status += "; cloud only"
             name = (self.ctl.condition_name(row.condition)
@@ -207,18 +398,32 @@ class DataPanel(ttk.Frame):
             self.table.insert("", "end", iid=row.relpath, values=(row.relpath, name, row.plate or "", row.timepoint if row.timepoint is not None else "", row.set_key or "", status))
         self.table.selection_set([key for key in selected if self.table.exists(key)])
         self.table.yview_moveto(y)
-        found = len({r.condition for r in self.ctl.found_condition_rows()})
-        note = self.ctl.scan_error or ("Review treatment names in Conditions. Use the photo list below for individual corrections."
-                                     if rows else "Choose the folder containing this experiment's photographs to begin.")
-        self.summary.configure(text=f"{len(rows)} photos found · {found} suggested treatments\n{note}")
+        assigned = sum(r.status == "ok" for r in rows)
+        attention = sum(r.status == "unresolved" or (r.cloud_only and r.status != "ignored") for r in rows)
+        ignored = sum(r.status == "ignored" for r in rows)
+        root = self.ctl.experiment.photo_root or "Choose a data folder to begin."
+        self.summary.configure(text=(f"{root}\n{len(rows)} photos · {assigned} assigned · {attention} need attention"
+                                     f" · {ignored} ignored · {len(self.table.get_children())} shown"
+                                     + (f"\n{self.ctl.scan_error}" if self.ctl.scan_error else "")))
+        descriptions = []
+        for facet, title in (("condition", "Treatment"), ("timepoint", "Hours"), ("plate", "Plate"), ("set", "Group")):
+            rule = profile.rule_for(facet)
+            source = ("photo order" if facet in self.ctl.experiment.order_facets() else
+                      {"stem": "filenames", "segment": "folders", "path": "the path", "treatment": "names"}.get(rule.source, "custom rule")
+                      if rule else "not read")
+            descriptions.append(f"{title}: {source}")
+        self.interpretation.configure(text=" · ".join(descriptions) if rows else "choose a data folder first")
         groups = self.ctl.experiment.strain_groups
-        self.group_summary.configure(text=(
-            "Defined strain groups: " + ", ".join(groups) + ". Edit their strains on Panel; all groups run separately."
-            if groups else "One strain panel defined. Use Add strain group if these photos contain another panel."))
+        self.group_summary.configure(text=("Strain groups: " + ", ".join(groups) if groups else ""))
+        self._selection_changed()
 
     def _detect(self):
         self.ctl.detect_organization()
         self.on_change()
+
+    def _edit_order(self):
+        from .order import edit_photo_order
+        edit_photo_order(self, self.ctl, self.on_change)
 
     def _adopt(self):
         self.ctl.adopt_found_conditions()

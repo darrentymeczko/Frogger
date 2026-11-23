@@ -95,7 +95,7 @@ class ReviewApp(ttk.Frame):
         self._preview = None          # candidate being previewed, not yet chosen
         self._graph_dir: "Path | None" = None   # scratch for redrawn graphs
         self._redrawn_sheets: dict[tuple, Path] = {}
-        self._stale_media: set[str] = set()
+        self._stale_media: set[str] = set(run.media) if (self.ctl.review.measurement or self.ctl.review.final_analysis) else set()
         # Strain summaries by (frame, statistics): {key: (frame, rows)}. The
         # frame is kept and compared by identity, so a recycled id() can
         # never serve another frame's numbers.
@@ -113,13 +113,27 @@ class ReviewApp(ttk.Frame):
             lambda error: self._job_failed(error, release=False))
         # For the surrounding program's own toolbar, when there is one.
         for name, action in (("save", self._save), ("undo", self._undo),
-                             ("redo", self._redo)):
+                             ("redo", self._redo), ("save_as", self._save_as),
+                             ("rename", self._rename_result), ("open_results", self._open_set)):
             self.host.add_command(name, action)
+        self.results_menu = self.host.add_menu("Results")
+        for label, action in (("Open Results…", self._open_set),
+                              ("Save Results", self._save),
+                              ("Save Results As…", self._save_as),
+                              ("Relink Original Images…", self._locate_photos)):
+            self.results_menu.add_command(label=label, command=action)
+        self.results_menu.add_command(label="Rename selected treatment...", accelerator="F2", command=self._rename_condition)
+        self.results_menu.add_command(label="Rename result...", command=self._rename_result)
+        self.results_menu.entryconfigure(2, accelerator="Ctrl+Shift+S")
+        from uikit.shortcuts import show_help
+        help_menu = self.host.add_menu("Help")
+        help_menu.add_command(label="Keyboard shortcuts", command=lambda: show_help(self))
         # Insist on being visible. A GUI started from a console that is itself
         # minimised or background inherits that show state through STARTUPINFO
         # and opens minimised -- the window is running and reachable only from
         # the taskbar, which from the outside is a launcher that did nothing.
         self.host.present()
+        self.candidates.tree.focus_set()
 
         # Draw the window NOW, and only then go and read photographs. The first
         # rebuild imports the measurement engine and walks the capture tree; on
@@ -140,6 +154,9 @@ class ReviewApp(ttk.Frame):
         # Reclaim a few pixels from the generous gaps around the workspace.
         # Together these small reductions add exactly one complete visible row
         # to all three tables at the default window size.
+        self.header.set_label.configure(takefocus=True)
+        self.header.set_label.bind("<Button-1>", lambda e: e.widget.focus_set())
+        self.header.set_label.bind("<Double-1>", lambda e: self._rename_result())
         self.header.grid(row=0, column=0, sticky="ew", pady=(theme.GAP, 0))
 
         tabs = ttk.Frame(self)
@@ -203,9 +220,22 @@ class ReviewApp(ttk.Frame):
             tabs, text="Locate photos…", command=self._locate_photos)
         self.btn_locate_photos.grid(row=0, column=4,
                                     padx=(0, theme.GAP))
-        self.btn_open_set = ttk.Button(tabs, text="Open set…",
+        self.btn_open_set = ttk.Button(tabs, text="Open Results…",
                                        command=self._open_set)
         self.btn_open_set.grid(row=0, column=5)
+        roi_bar = ttk.Frame(tabs)
+        roi_bar.grid(row=2,column=0,columnspan=6,sticky="w",pady=(0,4))
+        self.btn_roi = ttk.Button(roi_bar,text="Measurement ROI…",command=self._roi_settings)
+        self.btn_roi.pack(side="left")
+        self.btn_roi_overlay = ttk.Button(roi_bar,text="Review ROI overlays…",command=self._roi_overlays)
+        self.btn_roi_overlay.pack(side="left",padx=8)
+        self.roi_method_label = ttk.Label(roi_bar,text="")
+        self.roi_method_label.pack(side="left")
+        self._include_var = tk.BooleanVar(value=True)
+        self.btn_include = ttk.Checkbutton(
+            roi_bar, text="Include treatment in exports", variable=self._include_var,
+            command=lambda: self.ctl.set_included(self.ctl.medium, self._include_var.get()))
+        self.btn_include.pack(side="left", padx=8)
 
         panes = ttk.PanedWindow(self, orient="horizontal")
         panes.grid(row=2, column=0, sticky="nsew",
@@ -221,13 +251,17 @@ class ReviewApp(ttk.Frame):
         panes.add(left, weight=0)
 
         right = ttk.PanedWindow(panes, orient="vertical")
-        view, rotate = links.sheet_view()
+        from .presentation import sheet as sheet_presentation
+        settings = sheet_presentation(self.ctl.review.presentation)
+        view, rotate = settings.get("view", "fit"), settings.get("rotate", False)
         self.sheet = SheetView(right, on_toggle=self._toggle_graph, view=view,
-                               rotate=rotate, on_view=links.remember_sheet_view)
+                               rotate=rotate, on_view=self._presentation_changed,
+                               on_spot=self._spot_clicked)
         self.table = SpotTable(right, on_raw=self._set_raw,
                                on_outlier=self._set_outlier,
                                on_note=self._set_note,
-                               on_revert=self._revert_spot)
+                               on_revert=self._revert_spot,
+                               on_select=self._spot_selected)
         right.add(self.sheet, weight=3)
         right.add(self.table, weight=2)
         panes.add(right, weight=1)
@@ -256,7 +290,7 @@ class ReviewApp(ttk.Frame):
         for child in self._tabs.winfo_children():
             child.destroy()
         for i, medium in enumerate(self.ctl.run.media):
-            ttk.Radiobutton(self._tabs, text=self.ctl.run.medium_label(medium),
+            ttk.Radiobutton(self._tabs, text=self.ctl.medium_label(medium),
                             value=medium, variable=self._medium_var,
                             style="Toolbutton",
                             command=self._medium_changed).grid(
@@ -266,10 +300,13 @@ class ReviewApp(ttk.Frame):
         # Through the host: live anywhere in this tool, and nowhere else --
         # not in a dialog, and not in another tool sharing the window.
         bind = self.host.bind_key
-        bind("<Control-z>", lambda _e: self._undo())
-        bind("<Control-y>", lambda _e: self._redo())
-        bind("<Control-Z>", lambda _e: self._redo())
+        bind("<Control-z>", self._action_key(self._undo))
+        bind("<Control-y>", self._action_key(self._redo))
+        bind("<Control-Z>", self._action_key(self._redo))
         bind("<Control-s>", lambda _e: self._save())
+        bind("<Control-Shift-S>", self._action_key(self._save_as, allow_edit=True))
+        bind("<F2>", self._action_key(self._rename_selected))
+        bind("<Control-o>", lambda _e: self._open_set())
         bind("<Control-e>", lambda _e: self._export())
         bind("<Control-o>", lambda _e: self._open_set())
         bind("<Control-r>", lambda _e: self._redraw_graph())
@@ -278,14 +315,20 @@ class ReviewApp(ttk.Frame):
         # Guarded, not global: inside the spot table the arrows have to keep
         # moving between spots, and inside a text entry they have to keep
         # moving the cursor. Stealing either would make editing unusable.
-        for seq, fn in (("<Left>", lambda: self._step_medium(-1)),
+        navigation = (("<Left>", lambda: self._step_medium(-1)),
                         ("<Right>", lambda: self._step_medium(1)),
                         ("<Up>", lambda: self._step_candidate(-1)),
-                        ("<Down>", lambda: self._step_candidate(1))):
-            bind(seq, self._arrow(fn))
+                        ("<Down>", lambda: self._step_candidate(1)),
+                        ("<Prior>", lambda: self._step_candidate(-10)),
+                        ("<Next>", lambda: self._step_candidate(10)))
+        for seq, fn in navigation:
+            handler = self._arrow(fn)
+            bind(seq, handler)
+            # Widget bindings run BEFORE Treeview's class binding. At the
+            # host/window tag it is too late: Treeview has already moved once.
+            # Returning break here stops both the class and host handlers.
+            self.candidates.tree.bind(seq, handler)
 
-        bind("<Prior>", self._arrow(lambda: self._step_candidate(-10)))
-        bind("<Next>", self._arrow(lambda: self._step_candidate(10)))
         # G swaps between the pipeline's sheet and the redrawn graph.
         bind("<KeyPress-g>", self._arrow(self._toggle_graph))
         bind("<KeyPress-G>", self._arrow(self._toggle_graph))
@@ -296,16 +339,64 @@ class ReviewApp(ttk.Frame):
         bind("<KeyPress-r>", self._arrow(self.sheet.toggle_rotate))
         bind("<KeyPress-R>", self._arrow(self.sheet.toggle_rotate))
 
+    def _action_key(self, action, allow_edit=False):
+        def handler(event=None):
+            from uikit.shortcuts import editing
+            if not allow_edit and editing(self.focus_get()):
+                return None
+            action()
+            return "break"
+        return handler
+
+    def _rename_selected(self):
+        if self.focus_get() is self.header.set_label:
+            self._rename_result()
+        else:
+            self._rename_condition()
+
+    def _rename_result(self):
+        self._start_name_edit(self.header.set_label, self.ctl.display_label, None)
+
+    def _rename_condition(self):
+        if not self.ctl.medium:
+            return
+        buttons = self._tabs.winfo_children()
+        index = self.ctl.run.media.index(self.ctl.medium)
+        if index < len(buttons):
+            self._start_name_edit(buttons[index], self.ctl.medium_label(self.ctl.medium), self.ctl.medium)
+
+    def _start_name_edit(self, widget, text, medium):
+        if self._busy:
+            return
+        from uikit.shortcuts import InlineLabel
+        old = getattr(self, "_name_edit", None)
+        if old and not old.closed:
+            return
+        def commit(name):
+            self.ctl.rename_display(name, medium)
+            self._show_names()
+            self.candidates.tree.focus_set()
+        self._name_edit = InlineLabel(widget, text, commit, self.candidates.tree,
+                                      x=0, y=0, relwidth=1, relheight=1)
+
+    def _show_names(self):
+        self.host.set_title(f"{APP_TITLE} - {self.ctl.display_label}", tab=self.ctl.display_label)
+        self.header.set_label.configure(text=self.ctl.display_label)
+        for medium, button in zip(self.ctl.run.media, self._tabs.winfo_children()):
+            button.configure(text=self.ctl.medium_label(medium))
+
     #: Widgets that own the arrow keys themselves while they have focus.
     def _typing(self) -> bool:
         w = self.focus_get()
         if w is None:
             return False
-        if isinstance(w, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox)):
+        if isinstance(w, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox,
+                          tk.Spinbox, ttk.Spinbox, tk.Scale, ttk.Scale,
+                          tk.Listbox)):
             return True
         # The spot table: arrows move between spots, which is what a person
         # pressing them there means.
-        return w is getattr(self.table, "tree", None)
+        return isinstance(w, ttk.Treeview) and w is not self.candidates.tree
 
     def _arrow(self, fn):
         def handler(_event=None):
@@ -459,7 +550,7 @@ class ReviewApp(ttk.Frame):
     def _set_enabled(self, on: bool) -> None:
         state = ("!disabled" if on else "disabled")
         for w in (self.btn_use, self.btn_export, self.btn_redraw,
-                  self.btn_comparisons):
+                  self.btn_comparisons, self.btn_roi, self.btn_roi_overlay):
             w.state([state])
         self.test_choice.configure(state="readonly" if on else "disabled")
         self.alpha_entry.configure(state="normal" if on else "disabled")
@@ -467,9 +558,12 @@ class ReviewApp(ttk.Frame):
 
     # -- showing a set -------------------------------------------------------
 
-    def _show_set(self) -> None:
+    def _show_set(self, *, preserve_previews: bool = False) -> None:
         run = self.ctl.run
-        self.host.set_title(f"{APP_TITLE} — {run.label}", tab=run.label)
+        from .presentation import sheet as sheet_presentation
+        if not preserve_previews:
+            self.sheet.apply_presentation(sheet_presentation(self.ctl.review.presentation))
+        self.host.set_title(f"{APP_TITLE} — {self.ctl.display_label}", tab=self.ctl.display_label)
         self.host.set_path(run.results_dir)
         links.remember_set(run.results_dir)
         self._build_tabs()
@@ -482,11 +576,14 @@ class ReviewApp(ttk.Frame):
             index = sets.index(run.results_dir.resolve())
         except ValueError:
             index = -1
-        self.header.show(run.label, links.describe(self.ctl.capture_root)
+        self.header.show(self.ctl.display_label, links.describe(self.ctl.capture_root)
                          if ok else (self.ctl.config_error or "not linked"),
                          ok, index, len(sets))
-        self._redrawn_sheets.clear()
-        self._stale_media.clear()
+        if not preserve_previews:
+            self._redrawn_sheets.clear()
+            self._stale_media.clear()
+            if self.ctl.review.measurement or self.ctl.review.final_analysis:
+                self._stale_media.update(run.media)
 
         stale = rv.stale_picks(run, self.ctl.review)
         if stale:
@@ -495,6 +592,21 @@ class ReviewApp(ttk.Frame):
                 f"{', '.join(run.medium_label(m) for m in stale)} is not in this run's "
                 f"results any more — choose again", "warn")
         self._refresh()
+        source_problems = self.ctl.source_problems()
+        problems = source_problems + run.manifest.get("snapshot_warnings", [])
+        if problems:
+            self.header.show(self.ctl.display_label, "; ".join(problems), False, index, len(sets))
+            self.status.say("; ".join(problems) +
+                            (" — use Relink Original Images" if source_problems else ""), "warn")
+
+    def _presentation_changed(self, *_):
+        from .presentation import load as load_presentation
+        value = load_presentation(self.ctl.review.presentation)
+        if value.get("version") != 1:
+            self.status.say("This run has a newer presentation version; settings are retained unchanged", "warn")
+            return
+        value["sheet"] = {**value.get("sheet", {}), **self.sheet.presentation()}
+        self.ctl.set_presentation(value)
 
     def _medium_changed(self) -> None:
         self.ctl.set_medium(self._medium_var.get())
@@ -544,7 +656,35 @@ class ReviewApp(ttk.Frame):
 
     def _changed(self) -> None:
         """Controller callback: state moved, redraw everything that shows it."""
+        from .presentation import sheet as sheet_presentation
+        settings = sheet_presentation(self.ctl.review.presentation)
+        if any(self.sheet.presentation().get(k) != v for k, v in settings.items()
+               if k in self.sheet.presentation()):
+            self.sheet.apply_presentation(settings)
         self._refresh()
+        self._show_names()
+
+    def _roi_settings(self):
+        if self._busy or not self.ctl.can_edit:
+            self.status.say("Link original photos and wait for the current job first.", "warn")
+            return
+        from .gui.roi_dialog import ask_settings
+        settings = ask_settings(self, self.ctl.cfg)
+        if settings is None:
+            return
+        self.ctl.set_measurement(settings.inward_margin, settings.min_pixels)
+        self._stale_media.update(self.ctl.run.media)
+        self._redrawn_sheets.clear()
+        self.sheet.show_updated(None)
+        self._rebuild_current(redraw=True)
+
+    def _roi_overlays(self):
+        frame = self.ctl.cached_frame(cand=self._preview)
+        if frame is None:
+            self.status.say("Rebuild this candidate from its original photos first.", "warn")
+            return
+        from .gui.roi_dialog import show_overlays
+        show_overlays(self, frame)
 
     def _sync_statistics_controls(self, enabled: bool = True) -> None:
         """Reflect the saved test settings.
@@ -555,6 +695,7 @@ class ReviewApp(ttk.Frame):
         reference.
         """
         review = self.ctl.review
+        self._sync_roi_method()
         self._test_var.set(next(
             label for label, value in TEST_LABELS.items()
             if value == review.statistical_test))
@@ -578,7 +719,7 @@ class ReviewApp(ttk.Frame):
         short = ("all pairs" if review.all_pairs
                  else review.comparisons_text() if n_extra <= 1
                  else f"vs control + {n_extra}")
-        self.btn_comparisons.configure(text=f"Comparisons: {short}…")
+        self.btn_comparisons.configure(text="Normalization / comparisons…")
 
     def _statistics_changed(self, _event=None) -> None:
         review = self.ctl.review
@@ -617,24 +758,24 @@ class ReviewApp(ttk.Frame):
         self._refresh()
 
     def _choose_comparisons(self) -> None:
-        names = self.ctl.strain_names()
-        if not names:
-            self.status.say("the strain panel is not available until the "
-                            "photographs are linked", "warn")
+        from experiments.gui.analysis import ask_analysis
+        cfg = self.ctl.cfg or {}
+        if not cfg.get("strains"):
+            self.status.say("Link photographs to load the strain panel first", "warn")
             return
-        got = ask_comparisons(self.winfo_toplevel(), names,
-                              self.ctl.control_name(),
-                              self.ctl.review.extra_references,
-                              self.ctl.review.all_pairs)
-        if got is None:
-            return
-        if self.ctl.set_comparisons(*got):
+        chosen = ask_analysis(self.winfo_toplevel(), cfg["strains"], self.ctl.run.media,
+                              self.ctl.review.final_analysis,
+                              {m: v.get("exclude", []) for m, v in cfg.get("media", {}).items()},
+                              {m: self.ctl.medium_label(m) for m in self.ctl.run.media})
+        if chosen is not None and self.ctl.set_final_analysis(chosen):
+            self._summaries.clear()
             self._statistics_applied()
-            self.status.say(self.ctl.last_change)
+            self._rebuild_current(redraw=True)
         self._sync_statistics_controls(enabled=not self._busy)
 
     def _refresh(self) -> None:
         ctl = self.ctl
+        self._sync_roi_method()
         if ctl.reload_data_flags():
             # Saved in the data review meanwhile: the table's marks are stale.
             self.after_idle(self._rebuild_current)
@@ -648,9 +789,11 @@ class ReviewApp(ttk.Frame):
             counts = ctl.candidate_flags(c)
             if any(counts):
                 flagged[c.key] = counts
-        self.candidates.show(cands, default, chosen, drawn, flagged)
-
         shown = self._preview or chosen
+        self.candidates.show(cands, default, chosen, drawn, flagged,
+                             selected=shown, metrics_stale=rv.analysis_changed(
+                                 ctl.run, ctl.review, getattr(ctl, "recorded_config", None)))
+        self._prefetch_sheets(shown)
         self._show_sheet(shown)
         self._refresh_pick_note(shown, chosen, default)
         self._refresh_table()
@@ -662,7 +805,13 @@ class ReviewApp(ttk.Frame):
         if ctl.last_change:
             self.status.say(ctl.last_change)
 
+    def _sync_roi_method(self):
+        from src.spotting_roi import settings_from_config
+        roi = settings_from_config(self.ctl.cfg or {}, legacy_if_missing=True)
+        self.roi_method_label.configure(text=f"{roi.method} · margin {roi.inward_margin:.0%}")
+
     def _refresh_pick_note(self, shown, chosen, default) -> None:
+        self._include_var.set(self.ctl.review.is_included(self.ctl.medium))
         if shown is None:
             self.pick_note.configure(text="", foreground=theme.MUTED)
             self.btn_use.state(["disabled"])
@@ -692,7 +841,20 @@ class ReviewApp(ttk.Frame):
         if stale:
             text = "graph is out of date — Recompute data (Ctrl+R) · " + text
             colour = theme.MANUAL
-        self.pick_note.configure(text=text, foreground=colour)
+        if shown.quality_flags:
+            text += " · Quality: " + shown.quality_text
+        if not self.ctl.review.is_included(shown.medium):
+            text += " · excluded from exports (your saved decision)"
+        self.pick_note.configure(text=text, foreground=colour, wraplength=950)
+
+    def _spot_selected(self, row) -> None:
+        """A table row was picked: mark its spot, and its ROI, on the montage."""
+        self.sheet.highlight(row, self.table.rows)
+
+    def _spot_clicked(self, slot: int, replicate: int) -> None:
+        """A spot was clicked on the montage: pick its row in the table."""
+        if not self.table.select_spot(slot, replicate):
+            self.status.say("That spot has no row in the table below.", "warn")
 
     def _refresh_table(self) -> None:
         ctl = self.ctl
@@ -742,8 +904,18 @@ class ReviewApp(ttk.Frame):
 
     # -- choosing ------------------------------------------------------------
 
+    def _prefetch_sheets(self, cand):
+        if cand is not None:
+            ordered = [self.candidates._by_iid[i] for i in self.candidates.tree.get_children()]
+            index = next((i for i,c in enumerate(ordered) if c.key == cand.key),-1)
+            self.sheet.prefetch([self.ctl.run.sheet(ordered[i]) for i in (index+1,index-1)
+                                 if index >= 0 and 0 <= i < len(ordered)])
+        else:
+            self.sheet.prefetch([])
+
     def _show_sheet(self, cand) -> None:
         """Show a candidate and restore its redrawn sheet when one exists."""
+        self.sheet.display_medium_label = self.ctl.medium_label(cand.medium) if cand else ""
         self.sheet.show(cand, self.ctl.run.sheet(cand) if cand else None)
         if cand is None or cand.medium in self._stale_media:
             return
@@ -753,8 +925,12 @@ class ReviewApp(ttk.Frame):
 
     def _preview_candidate(self, cand) -> None:
         chosen = self.ctl.chosen()
+        current = self._preview or chosen
+        if current is not None and cand.key == current.key:
+            return  # queued selection events must not repeat the same work
         self._preview = None if (chosen and cand.key == chosen.key) else cand
         shown = self._preview or chosen
+        self._prefetch_sheets(shown)
         self._show_sheet(shown)
         self._refresh_pick_note(shown, chosen,
                                 self.ctl.run.pipeline_best(self.ctl.medium))
@@ -776,14 +952,27 @@ class ReviewApp(ttk.Frame):
         if self.ctl.reset_pick():
             self._rebuild_current()
 
-    def _rebuild_current(self) -> None:
+    def _rebuild_current(self, redraw: bool = False) -> None:
         """Rebuild this medium off the UI thread, then redraw the table."""
         if not self.ctl.can_edit:
             return
         medium = self.ctl.medium
         preview = self._preview
+        shown = preview or self.ctl.chosen()
+        controller = self.ctl
+        requested = (id(controller), id(controller.run), controller._generation,
+                     shown.key if shown else None, controller.capture_root, controller.run)
 
         def landed(_frame) -> None:
+            current = self._preview or self.ctl.chosen()
+            if requested != (id(self.ctl),id(self.ctl.run),self.ctl._generation,
+                             current.key if current else None,self.ctl.capture_root,self.ctl.run):
+                # Navigation remains enabled while a rebuild is running. The
+                # serialized lane now services the latest selection, rather
+                # than leaving its table permanently "Rebuilding…".
+                self._refresh_table()
+                self._rebuild_current(redraw=redraw)
+                return
             # Clear the "rebuilding..." line. Leaving it up once the table has
             # filled in reads as a job that never finished.
             self.status.say("")
@@ -792,9 +981,11 @@ class ReviewApp(ttk.Frame):
             self._refresh_pick_note(
                 self._preview or self.ctl.chosen(), self.ctl.chosen(),
                 self.ctl.run.pipeline_best(self.ctl.medium))
+            if redraw and _frame is not None:
+                self._redraw_graph()
 
-        self._run_async(lambda: self.ctl.frame(medium, cand=preview), landed,
-                        f"rebuilding {self.ctl.run.medium_label(medium)} from "
+        self._run_async(lambda: controller.frame(medium, cand=preview), landed,
+                        f"rebuilding {self.ctl.medium_label(medium)} from "
                         f"the measurement cache…")
 
     # -- redrawing the graph --------------------------------------------------
@@ -815,15 +1006,47 @@ class ReviewApp(ttk.Frame):
             self._graph_dir = Path(tempfile.mkdtemp(prefix="rr_graph_"))
 
         work = self._graph_dir
+        from .export import named_frames
+        frame = named_frames(self.ctl.run, [frame], self.ctl.review)[0]
         statistics = self.ctl.review.statistics_kwargs()
         original_sheet = self.ctl.run.sheet(frame.candidate)
         key = frame.candidate.key
+        token = self._graph_token()
+        # Each request owns its output directory. An obsolete redraw cannot
+        # overwrite a newer graph with the same candidate filename.
+        work = Path(tempfile.mkdtemp(dir=work,prefix='request-'))
         self._run_async(
             lambda: (key, background.draw_preview(
                 frame, work, original_sheet=original_sheet, **statistics)),
-            self._redraw_finished,
-            f"redrawing {self.ctl.run.medium_label(frame.medium)} with "
+            lambda result: self._redraw_if_current(token,result),
+            f"redrawing {self.ctl.medium_label(frame.medium)} with "
             f"PyPrism Plot…")
+
+    def _state_token(self):
+        from copy import deepcopy
+        shown = self._preview or self.ctl.chosen()
+        return (id(self.ctl),id(self.ctl.run),self.ctl.capture_root,self.ctl._generation,
+                shown.key if shown else None,deepcopy(self.ctl.review.to_dict()),
+                self.ctl.run,self.ctl)
+
+    def _graph_token(self):
+        shown = self._preview or self.ctl.chosen()
+        frame = self.ctl.cached_frame(cand=self._preview)
+        paths = ([self.ctl.run.sheet(shown)] if shown else [])
+        paths += [p.ref.path for p in getattr(frame,'plates',())]
+        sources = []
+        for path in paths:
+            try:
+                st = Path(path).stat()
+                stamp = (st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns)
+            except OSError:
+                stamp = None
+            sources.append((str(path),stamp))
+        return self._state_token(),tuple(sources)
+
+    def _redraw_if_current(self, token, result):
+        if not self._closed and token == self._graph_token():
+            self._redraw_finished(result)
 
     def _redraw_finished(self, result) -> None:
         key, result = result if result else (None, None)
@@ -884,7 +1107,12 @@ class ReviewApp(ttk.Frame):
     def _undo(self) -> None:
         label = self.ctl.undo()
         self.status.say(f"undid: {label}" if label else "nothing to undo")
+        if label == "Change presentation":
+            return
         if label:
+            if label.startswith("Recalculate "):
+                self._stale_media.update(self.ctl.run.media)
+                self._redrawn_sheets.clear()
             medium = self.ctl.medium
             self._stale_media.add(medium)
             self._redrawn_sheets = {
@@ -897,7 +1125,12 @@ class ReviewApp(ttk.Frame):
     def _redo(self) -> None:
         label = self.ctl.redo()
         self.status.say(f"redid: {label}" if label else "nothing to redo")
+        if label == "Change presentation":
+            return
         if label:
+            if label.startswith("Recalculate "):
+                self._stale_media.update(self.ctl.run.media)
+                self._redrawn_sheets.clear()
             medium = self.ctl.medium
             self._stale_media.add(medium)
             self._redrawn_sheets = {
@@ -909,28 +1142,92 @@ class ReviewApp(ttk.Frame):
 
     # -- files ---------------------------------------------------------------
 
-    def _save(self) -> None:
+    def _measure_first(self, then) -> bool:
+        """Measure what the result does not own yet, in the worker processes, and
+        call ``then()`` afterwards; False (doing nothing) if there is nothing to
+        measure. A result never saved has every unchosen dilution to measure,
+        minutes of work the save would otherwise do on this window's thread."""
+        try:
+            job = self.ctl.measuring()
+        except Exception:
+            return False  # The save itself reports it.
+        if job is None:
+            return False
+        count, work = job
+        def measured(failed):
+            self.ctl.measured(failed)
+            then()
+        self._run_async(
+            lambda: work(lambda k, n: self._progress(f"measuring photo sets to save with the results: {k} of {n}…")),
+            measured, f"measuring {count} photo set(s) to save with the results…")
+        return True
+
+    def _save(self, measured=False) -> bool:
+        if self._busy:
+            self.status.say("Wait for the current operation before saving results", "warn")
+            return False
+        if not measured and self._measure_first(lambda: self._save(measured=True)):
+            return False
         try:
             path = self.ctl.save()
         except Exception as e:
             messagebox.showerror(APP_TITLE, f"Could not save:\n{e}", parent=self)
-            return
-        self.status.say(f"saved {path.name}", "ok")
+            return False
+        self._show_set(preserve_previews=True)
+        unavailable = self.ctl.run.manifest.get("measurement_archive", {}).get("unavailable", [])
+        self.status.say(f"Saved results: {self.ctl.display_label}" +
+                        (f"; {len(unavailable)} measurement archive(s) unavailable; originals needed" if unavailable else ""),
+                        "warn" if unavailable else "ok")
+        return True
+
+    def _save_as(self, got=None) -> bool:
+        if self._busy:
+            self.status.say("Wait for the current operation before saving results", "warn")
+            return False
+        measured = got is not None
+        got = got or filedialog.asksaveasfilename(parent=self, title="Save Results As — new folder name",
+            initialdir=str(self.ctl.run.results_dir.parent),
+            initialfile=self.ctl.run.results_dir.name + " - Copy", confirmoverwrite=False)
+        if not got:
+            return False
+        if not measured and self._measure_first(lambda: self._save_as(got)):
+            return False
+        try:
+            self.ctl.save_as(Path(got))
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not save results as:\n{exc}", parent=self)
+            return False
+        self._preview = None
+        self.sheet.cache.clear()
+        self._show_set()
+        self._rebuild_current()
+        unavailable = self.ctl.run.manifest.get("measurement_archive", {}).get("unavailable", [])
+        self.status.say(f"Saved independent results: {self.ctl.display_label}" +
+                        (f"; {len(unavailable)} measurement archive(s) unavailable; originals needed" if unavailable else ""),
+                        "warn" if unavailable else "ok")
+        return True
 
     def _locate_photos(self) -> None:
+        if self._busy:
+            self.status.say("Wait for the current operation before relinking originals", "warn")
+            return
         got = filedialog.askdirectory(
-            parent=self, title=f"Photographs for {self.ctl.run.label}",
+            parent=self, title=f"Photographs for {self.ctl.display_label}",
             initialdir=str(self.ctl.capture_root or links.default_start_dir()))
         if not got:
             return
         ok, msg = self.ctl.link_photos(Path(got))
         self.status.say(msg, "ok" if ok else "error")
         if ok:
+            self.sheet.cache.clear()
             self._show_set()
             self._rebuild_current()
 
     def _load_set(self, results_dir: Path) -> bool:
         """Swap the whole window over to another results folder."""
+        if self._busy:
+            self.status.say("Wait for the current operation before opening results", "warn")
+            return False
         if not self._confirm_discard():
             return False
         try:
@@ -948,7 +1245,7 @@ class ReviewApp(ttk.Frame):
         return True
 
     def _open_set(self) -> None:
-        got = choose_set(self.winfo_toplevel())
+        got = _ask_folder(self.winfo_toplevel())
         # In a tab of its own where the host has tabs; otherwise in place.
         if got is not None and not self.host.open_document("review", got):
             self._load_set(got)
@@ -966,14 +1263,27 @@ class ReviewApp(ttk.Frame):
                 parent=self)
             return
         from .gui.export_dialog import ask_export
-        from .model import Review
-        from copy import deepcopy
 
         # The slides are laid out as the sheet is shown right now.
         request = ask_export(self.winfo_toplevel(), ctl.run, ctl.review,
                              self.sheet.view, self.sheet.rotated)
         if request is None:
             return
+        for medium in ctl.run.media:
+            ctl.set_included(medium, medium in request.media)
+        from dataclasses import asdict
+        from .presentation import load as load_presentation
+        presentation = load_presentation(ctl.review.presentation)
+        if presentation.get("version") == 1:
+            presentation["export"] = {**presentation.get("export", {}), **asdict(request.options)}
+            ctl.set_presentation(presentation)
+        if not self._measure_first(lambda: self._export_saved(request)):
+            self._export_saved(request)
+
+    def _export_saved(self, request) -> None:
+        from .model import Review
+        from copy import deepcopy
+        ctl = self.ctl
         try:
             ctl.save()
         except Exception as e:
@@ -1020,7 +1330,7 @@ class ReviewApp(ttk.Frame):
         if answer is None:
             return False
         if answer:
-            self._save()
+            return self._save()
         return True
 
     def _can_close(self) -> bool:
@@ -1036,6 +1346,7 @@ class ReviewApp(ttk.Frame):
     def _dispose(self) -> None:
         """Run once on the way out, whatever closed the tool."""
         self._closed = True
+        self.sheet.close()
         if self._pump_id is not None:
             try:
                 self.after_cancel(self._pump_id)
@@ -1286,7 +1597,7 @@ ERROR_LOG = PROJECT_ROOT / "review_error.log"
 def _fatal(error: BaseException) -> None:
     """Report a startup failure even when launched without a console.
 
-    `run_review.bat` hands the window to pythonw so nothing is left sitting
+    A launcher may hand the window to pythonw so nothing is left sitting
     behind it, which means a traceback on stderr goes nowhere at all. Silence is
     the one outcome a launcher must never produce, so it is written down and
     shown.

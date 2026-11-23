@@ -1,15 +1,15 @@
-"""Spotting Quantification -- every stage of the pipeline behind one program.
+"""Frogger -- every stage of the pipeline behind one program.
 
     py spotting_app.py               the workbench: every tool in one window
     py spotting_app.py <stage> ...   run one stage directly
 
-    workbench     the workbench window         (run_workbench.bat)
-    plate         Plate Template Designer      (run_plate_designer.bat)
-    experiment    Experiment Designer          (run_experiment_designer.bat)
-    data-review   Data Review                  (run_data_review.bat)
-    spotting      Spotting quantification      (run_spotting.bat)
-    timecourse    Time course                  (run_timecourse.bat)
-    review        Results Review               (run_review.bat; --apply re-exports)
+    workbench     the workbench window         (run_frogger.bat)
+    plate         Plate Template Designer
+    experiment    Experiment Designer
+    data-review   Data Review
+    spotting      Spotting quantification
+    timecourse    Time course
+    review        Results Review               (--apply re-exports)
 
 The workbench is the program people use. The single-tool stages are how each
 tool still runs on its own; `spotting` and `timecourse` are the older console
@@ -18,12 +18,11 @@ pipelines, kept for scripting -- measuring is done from an experiment now.
     plate-cli, experiment-cli, data-review-cli, montage, pptx, quant
                   the command-line tools that sit behind the stages
 
-Everything after the stage name goes to that stage untouched, exactly as the
-matching .bat file passes it on. Dragging folders onto the program runs the time
-course on them, as it does for run_timecourse.bat.
+Everything after the stage name goes to that stage untouched. Dragging folders
+onto the program runs the time course on them.
 
-The .bat files still work and are unchanged. This file also runs from source:
-`py spotting_app.py timecourse ...`, or bare for the launcher window.
+run_frogger.bat is the one launcher: it runs the workbench. Any stage runs from
+source with `py spotting_app.py <stage> ...`.
 
 Packaging lives outside this file. If it is packaged again -- PyInstaller
 --onedir feeding an Inno Setup installer is the shape that suits distribution
@@ -34,7 +33,7 @@ built-in copy, so an edit does not need a repackage.
 Packaged, the program has no console of its own: the launcher and the windows
 would otherwise each leave an empty terminal behind them. The two stages that
 ask questions (`spotting`, `timecourse`) open a console when they start, and
-hold it open at the end the way the .bat files' `pause` does.
+hold it open at the end.
 """
 
 from __future__ import annotations
@@ -88,7 +87,7 @@ def _use_local_source() -> bool:
 #: so from source; for the .exe, only when those folders sit beside it.
 LOCAL_SOURCE = _use_local_source()
 
-APP_TITLE = "Spotting Quantification"
+APP_TITLE = "Frogger"
 ERROR_LOG = ROOT / "spotting_error.log"
 
 #: Set by the launcher on the stages that need a console of their own.
@@ -191,7 +190,7 @@ class Stage:
 
 
 STAGES = [
-    Stage("workbench", "Spotting Quantification",
+    Stage("workbench", "Frogger",
           "Every tool in one window: plate templates, experiments and their "
           "review, as tabs, with Home to start from.",
           _workbench, "window"),
@@ -245,7 +244,6 @@ Stages:
   workbench      the workbench window (what running with no stage opens)
   plate          Plate Template Designer, on its own
   experiment     Experiment Designer, on its own
-  data-review    Data Review, on its own  (flag bad plates and spots first)
   review         Results Review, on its own  (--apply re-exports, no window)
 
 Console pipelines, kept for scripting (measure from an experiment instead):
@@ -253,7 +251,7 @@ Console pipelines, kept for scripting (measure from an experiment instead):
   timecourse     Time course (drag folders onto the program to run these)
 
 Command-line tools:
-  plate-cli      experiment-cli      data-review-cli      montage      pptx      quant
+  plate-cli      experiment-cli      montage      pptx      quant
 
   --selftest     check that every stage loads, then exit
   --help         this text

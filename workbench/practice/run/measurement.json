@@ -1,0 +1,5 @@
+{
+  "method": "centered-interior-v1",
+  "inward_margin": 0.15,
+  "min_pixels": 25
+}

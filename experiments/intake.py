@@ -28,12 +28,13 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from .model import QUANTIFY, TIMECOURSE, Experiment
+from .model import QUANTIFY, TIMECOURSE, Experiment, OrderSlot
 from .profiles import (
     HOURS_PATTERNS,
     PLATE_PATTERNS,
     FacetRule,
     NamingProfile,
+    apply_keywords,
     apply_profile,
     builtin,
     condition_code,
@@ -106,6 +107,9 @@ class PhotoRow:
     #: Facets that could not be read, for the ones that are unresolved.
     missing: tuple[str, ...] = ()
     cloud_only: bool = False
+    #: Why an unresolved photo could not be read, when there is more to say
+    #: than which facets are missing.
+    note: str = ""
 
     @property
     def key(self) -> tuple:
@@ -135,6 +139,9 @@ class PhotoRow:
 class Resolution:
     rows: list[PhotoRow] = field(default_factory=list)
     complaints: list[str] = field(default_factory=list)
+    #: folder -> photo count, for folders the photo order could not be applied
+    #: to because they hold a different number of photos than it lists.
+    order_mismatches: dict[str, int] = field(default_factory=dict)
 
     def usable(self) -> list[PhotoRow]:
         return [r for r in self.rows if r.is_ok]
@@ -224,12 +231,13 @@ def scan_images(root: Path, *, max_depth: int = MAX_DEPTH) -> tuple[list[ImageFi
     return files, complaints
 
 
-def _natural_sort(values) -> list[str]:
+def _natural_key(v: str):
     """Sort so set 2 comes before set 10, the way a person reads them."""
-    def key(v: str):
-        return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", v)]
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", v)]
 
-    return sorted(values, key=key)
+
+def _natural_sort(values) -> list[str]:
+    return sorted(values, key=_natural_key)
 
 
 def _rel(path: Path, root: Path) -> str:
@@ -523,6 +531,79 @@ def _alias_table(labels: list[str], existing: dict[str, str] | None = None) -> d
 
 
 # ---------------------------------------------------------------------------
+# Photo order
+# ---------------------------------------------------------------------------
+#
+# Some benches photograph several strain sets at one sitting and file them all
+# in one folder per medium/time/treatment, always in the same order: set A plate
+# 1, set A plate 2, set B plate 1, ... Nothing in the names says which is which,
+# so `_infer_structure` correctly refuses to guess. The user states the order
+# once instead, and the position of each photo in its folder is then a fact,
+# not a guess -- provided the folder holds exactly that many photos. A folder
+# holding more or fewer cannot be read by position (which one is missing, or
+# extra?), so its photos are left for the user rather than shifted silently.
+
+
+def folder_of(relpath: str) -> str:
+    return relpath.rpartition("/")[0]
+
+
+def build_order(groups, plates, *, groups_first: bool = True) -> tuple[OrderSlot, ...]:
+    """The regular orders a bench actually uses.
+
+    `groups_first` photographs every plate of one strain group before the next
+    (A1, A2, B1, B2); otherwise plate 1 of every group comes first (A1, B1, A2,
+    B2). `groups` may be `[None]` for a single panel.
+    """
+    if groups_first:
+        return tuple(OrderSlot(p, g) for g in groups for p in plates)
+    return tuple(OrderSlot(p, g) for p in plates for g in groups)
+
+
+def order_folders(e: Experiment, files: list[ImageFile]) -> dict[str, list[ImageFile]]:
+    """Each folder's photos, in the order the photo order counts them.
+
+    Natural filename order, which is how Explorer lists them and how camera
+    counters (`IMG_0099`, `IMG_0100`; `_9`, `_9_1`, `_9_2`) number them. Ignored
+    photos do not take a position, so leaving out a blurred extra shot is how a
+    folder with one photo too many is put right.
+    """
+    ignored = set(e.ignored)
+    out: dict[str, list[ImageFile]] = {}
+    for f in files:
+        if f.relpath not in ignored:
+            out.setdefault(folder_of(f.relpath), []).append(f)
+    for photos in out.values():
+        photos.sort(key=lambda f: (_natural_key(f.parts[-1]), f.parts[-1]))
+    return dict(sorted(out.items(), key=lambda kv: _natural_key(kv[0])))
+
+
+def place_by_order(e: Experiment, files: list[ImageFile]
+                   ) -> tuple[dict[str, OrderSlot], dict[str, int]]:
+    """relpath -> its slot in the photo order, and the folders it did not fit.
+
+    The second value maps each mismatched folder to how many photos it holds.
+    """
+    order = e.photo_order
+    placed: dict[str, OrderSlot] = {}
+    mismatched: dict[str, int] = {}
+    if not order:
+        return placed, mismatched
+    for folder, photos in order_folders(e, files).items():
+        if len(photos) != len(order):
+            mismatched[folder] = len(photos)
+            continue
+        for f, slot in zip(photos, order):
+            placed[f.relpath] = slot
+    return placed, mismatched
+
+
+def order_mismatch_note(count: int, expected: int) -> str:
+    return (f"its folder has {count} {'photo' if count == 1 else 'photos'}; "
+            f"the photo order lists {expected}")
+
+
+# ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
 
@@ -597,8 +678,9 @@ def resolve(e: Experiment, files: list[ImageFile]) -> Resolution:
     """Decide what every photo is, under this experiment's profile and overrides.
 
     Precedence is fixed and total: `ignored` beats `overrides`, which beat the
-    profile. Overrides are keyed on the relative path, so re-scanning after a
-    few more photos arrive re-reads the layout without touching a single hand
+    keyword rules, which beat the photo order, which beats the profile.
+    Overrides are keyed on the relative path, so re-scanning after a few more
+    photos arrive re-reads the layout without touching a single hand
     correction.
     """
     required = INFER_FACETS.get(e.mode, ())
@@ -620,9 +702,26 @@ def resolve(e: Experiment, files: list[ImageFile]) -> Resolution:
     # Use a local profile: resolving a saved experiment is a read-only operation.
     labels = [apply_profile(f.parts, e.profile).get("condition_label", "") for f in files]
     profile = replace(e.profile, aliases=_alias_table([v for v in labels if v], e.profile.aliases))
+    placed, mismatched = place_by_order(e, files)
+    by_order = e.order_facets()
     for f in files:
         facets = apply_profile(f.parts, profile)
         _match_declared_condition(e, facets)
+        # The order is the only automatic source of what it assigns: a folder
+        # it does not fit must not fall back to a name-based reading that
+        # could disagree with the photos around it.
+        for facet in by_order:
+            facets.pop(facet, None)
+            facets.pop(f"{facet}_label", None)
+        slot = placed.get(f.relpath)
+        if slot is not None:
+            facets["plate"] = slot.plate
+            if slot.group is not None:
+                facets["set"] = slot.group
+        for facet, value in apply_keywords(f.parts, e.keywords).items():
+            if facet == "condition":
+                facets.pop("condition_label", None)
+            facets[facet] = value
         for facet, value in e.overrides.get(f.relpath, {}).items():
             if facet.endswith("_label"):
                 facets[facet] = str(value)
@@ -642,6 +741,10 @@ def resolve(e: Experiment, files: list[ImageFile]) -> Resolution:
             status = "unresolved"
         else:
             status = "ok"
+        folder = folder_of(f.relpath)
+        note = (order_mismatch_note(mismatched[folder], len(e.photo_order))
+                if status == "unresolved" and folder in mismatched
+                and set(missing) & set(by_order) else "")
 
         rows.append(
             PhotoRow(
@@ -656,11 +759,12 @@ def resolve(e: Experiment, files: list[ImageFile]) -> Resolution:
                 status=status,
                 missing=missing,
                 cloud_only=f.cloud_only,
+                note=note,
             )
         )
 
     rows = _number_shots(rows)
-    return Resolution(rows=rows, complaints=complaints)
+    return Resolution(rows=rows, complaints=complaints, order_mismatches=mismatched)
 
 
 def _number_shots(rows: list[PhotoRow]) -> list[PhotoRow]:
@@ -699,7 +803,7 @@ def check_resolution(e: Experiment, res: Resolution, template=None,
     as bad; the multi-step analysis leaves them out, so it asks nothing of them.
     """
     if e.strain_groups:
-        issues = []
+        issues = _check_order_fit(e, res)
         unassigned = [r for r in res.rows if r.status != "ignored"
                       and r.set_key not in e.strain_groups]
         if unassigned:
@@ -725,12 +829,12 @@ def check_resolution(e: Experiment, res: Resolution, template=None,
         # chosen one at a time and `validate._check_picks` judges those. All the
         # folder can say is what is physically in it.
         from .multistep import design_errors
-        return _check_folder_contents(res) + [
+        return _check_folder_contents(res) + _check_order_fit(e, res) + [
             Issue(Severity.ERROR, "multi_step_photos", m)
             for m in design_errors(e, resolution=res,
                                    flagged_plates=flagged_plates)]
 
-    issues: list[Issue] = []
+    issues: list[Issue] = _check_order_fit(e, res)
     usable = res.usable()
 
     if not usable:
@@ -831,6 +935,23 @@ def check_resolution(e: Experiment, res: Resolution, template=None,
                   for m in design_errors(e, resolution=res,
                                          flagged_plates=flagged_plates))
     return issues
+
+
+def _check_order_fit(e: Experiment, res: Resolution) -> list[Issue]:
+    """Folders the photo order could not be applied to, named one by one."""
+    if not e.photo_order or not res.order_mismatches:
+        return []
+    shown = "; ".join(f"{folder or '(top folder)'} ({n})"
+                      for folder, n in list(res.order_mismatches.items())[:5])
+    more = len(res.order_mismatches) - 5
+    more = f" and {more} more" if more > 0 else ""
+    return [Issue(
+        Severity.WARNING, "photo_order_mismatch",
+        f"{len(res.order_mismatches)} "
+        f"{'folder does' if len(res.order_mismatches) == 1 else 'folders do'} "
+        f"not hold the {len(e.photo_order)} photos the photo order lists, so "
+        f"their photos were not assigned by position: {shown}{more}. Ignore "
+        f"extra photos, or assign these photos by hand in Data")]
 
 
 def _check_folder_contents(res: Resolution) -> list[Issue]:

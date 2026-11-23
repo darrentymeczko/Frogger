@@ -1,4 +1,4 @@
-"""The panel: which strain is in which sample slot, and which one is the control.
+"""The panel: which strain is in each sample slot.
 
 The slot numbers come from the plate template, so this is the screen where a
 template stops being geometry and becomes an experiment. Slot colours are
@@ -21,12 +21,14 @@ from uikit import tokens
 
 
 class StrainPanel(ttk.Frame):
-    """One row per sample slot: a colour chip, a name, and a control button."""
+    """One row per sample slot, with a colour chip and a name."""
 
-    def __init__(self, master, controller, on_change: Callable[[], None]):
+    def __init__(self, master, controller, on_change: Callable[[], None],
+                 on_edit_layout=None):
         super().__init__(master, padding=(10, 8))
         self.ctl = controller
         self.on_change = on_change
+        self.on_edit_layout = on_edit_layout
         self.control = tk.IntVar(value=0)
         self._rows: list[tuple[int, tk.StringVar]] = []
         self._entries: dict[int, ttk.Entry] = {}
@@ -38,7 +40,7 @@ class StrainPanel(ttk.Frame):
         self.panes = panes
         panes.pack(fill="both", expand=True)
         left = ttk.Frame(panes, padding=(0, 0, 10, 0))
-        right = ttk.LabelFrame(panes, text="Plate template preview", padding=(10, 8))
+        right = ttk.LabelFrame(panes, text="Experiment plate layout", padding=(10, 8))
         self.strain_column = left
         self.preview_column = right
         panes.add(left, weight=3)
@@ -48,8 +50,8 @@ class StrainPanel(ttk.Frame):
         self.intro = ttk.Label(
             left,
             text=("Name each sample slot of the plate template. Leave a slot "
-                  "blank if nothing was spotted there.\nThe control is the "
-                  "strain every other one is reported relative to."),
+                  "blank if nothing was spotted there.\nChoose normalization and "
+                  "comparison references in the final Analysis tab."),
             foreground=tokens.TEXT_MUTED, justify="left",
         )
         self.intro.pack(anchor="w", fill="x", pady=(0, 8))
@@ -60,8 +62,6 @@ class StrainPanel(ttk.Frame):
         head.pack(fill="x")
         ttk.Label(head, text="Slot", width=6, font=("", 9, "bold")).pack(side="left")
         ttk.Label(head, text="Strain", font=("", 9, "bold")).pack(side="left")
-        ttk.Label(head, text="Control", font=("", 9, "bold")).pack(side="right",
-                                                                   padx=(0, 12))
 
         # Keep the headings visible and scroll only the strain rows.  A plain
         # frame silently clips its children when a template has more slots
@@ -93,8 +93,12 @@ class StrainPanel(ttk.Frame):
 
         preview_bar = ttk.Frame(right)
         preview_bar.pack(fill="x", pady=(0, 6))
+        self.edit_layout_button = ttk.Button(
+            preview_bar, text="Create layout...", command=on_edit_layout)
+        if on_edit_layout is not None:
+            self.edit_layout_button.pack(side="left", padx=(0, 6))
         self.choose_template_button = ttk.Button(
-            preview_bar, text="Choose plate template...",
+            preview_bar, text="Copy from template...",
             command=self._choose_template)
         self.choose_template_button.pack(side="left")
         self.template_label = ttk.Label(
@@ -117,6 +121,10 @@ class StrainPanel(ttk.Frame):
         self.template_scroll = ttk.Scrollbar(
             preview_area, orient="horizontal", command=self.template_preview.xview)
         self.template_preview.configure(xscrollcommand=self.template_scroll.set)
+        self.template_vscroll = ttk.Scrollbar(
+            preview_area, orient="vertical", command=self.template_preview.yview)
+        self.template_preview.configure(yscrollcommand=self.template_vscroll.set)
+        self.template_vscroll.grid(row=0, column=1, sticky="ns")
         self.template_preview.grid(row=0, column=0, sticky="nsew")
         self.template_scroll.grid(row=1, column=0, sticky="ew")
         self.template_scroll.grid_remove()
@@ -136,6 +144,8 @@ class StrainPanel(ttk.Frame):
     def refresh(self) -> None:
         self.group_selector.refresh()
         e = self.ctl.panel_experiment
+        self.edit_layout_button.configure(
+            text="Edit layout..." if self.ctl.template is not None else "Create layout...")
         if self.ctl.template is not None:
             self.template_label.configure(
                 text=f"{self.ctl.template.name}  "
@@ -162,13 +172,14 @@ class StrainPanel(ttk.Frame):
         if template is None:
             self.template_details.configure(
                 text=self.ctl.template_error or
-                "Choose a plate template to see its layout here."
+                "Create a layout here, or copy a reusable plate template."
             )
         else:
             self.template_details.configure(
                 text=(f"{template.name}\n{template.sample_slots()} sample slots  ·  "
                       f"{len(template.plates)} plates  ·  "
-                      f"{template.dilution.levels} dilution levels")
+                      f"{template.dilution.levels} dilution levels\n"
+                      "Embedded in this experiment; template-file edits do not change it.")
             )
         if template is not None and len(template.plates) > 2:
             self.template_scroll.grid()
@@ -191,9 +202,22 @@ class StrainPanel(ttk.Frame):
         plates = template.plates
         visible = min(2, len(plates))
         gap = 12
-        section_w = max(220, (width - gap * (visible + 1)) / max(1, visible))
+        # Keep a readable minimum; large layouts scroll instead of reducing
+        # slot identities to tiny, overlapping pixels.
+        min_cell = 28
+        section_w = max(220, template.cols * min_cell + 42,
+                        (width - gap * (visible + 1)) / max(1, visible))
         content_width = gap + len(plates) * (section_w + gap)
-        canvas.configure(scrollregion=(0, 0, content_width, height))
+        content_height = max(height, template.rows * min_cell + 58)
+        canvas.configure(scrollregion=(0, 0, content_width, content_height))
+        if content_width > width:
+            self.template_scroll.grid()
+        else:
+            self.template_scroll.grid_remove()
+        if content_height > height:
+            self.template_vscroll.grid()
+        else:
+            self.template_vscroll.grid_remove()
         for index, plate in enumerate(plates):
             left = gap + index * (section_w + gap)
             if index:
@@ -215,13 +239,13 @@ class StrainPanel(ttk.Frame):
             # from becoming a single comically oversized disc.
             display_scale = max(1.0, self.winfo_fpixels("1i") / 96)
             cell = min((section_w - 42) / plate.cols,
-                       (height - 58) / plate.rows,
+                       (content_height - 58) / plate.rows,
                        72 * display_scale)
-            cell = max(4, cell)
+            cell = max(min_cell, cell)
             grid_w = cell * plate.cols
             grid_h = cell * plate.rows
             x0 = left + (section_w - grid_w) / 2
-            y0 = 34 + max(0, (height - 42 - grid_h) / 2)
+            y0 = 34 + max(0, (content_height - 42 - grid_h) / 2)
             previous_replicate = None
             for row_index, row in enumerate(plate.cells):
                 row_placement = next(
@@ -264,6 +288,10 @@ class StrainPanel(ttk.Frame):
                                        x + radius, y + radius,
                                        fill=fill, outline=edge,
                                        tags=tuple(tags))
+                    if placement:
+                        from plate_template.gui.slot_labels import draw_slot
+                        draw_slot(canvas, x, y, cell, placement.sample_slot,
+                                  fill, tags=tuple(tags) + ("slot-label",))
 
     def _rebuild(self, slots: int) -> None:
         for child in self.rows_frame.winfo_children():
@@ -295,8 +323,6 @@ class StrainPanel(ttk.Frame):
             entry.bind("<Up>",
                        lambda _e, s=slot, v=var: self._commit_and_move(s, v, -1))
 
-            ttk.Radiobutton(row, variable=self.control, value=slot,
-                            command=self._set_control).pack(side="right", padx=(0, 24))
             self._rows.append((slot, var))
             self._entries[slot] = entry
 

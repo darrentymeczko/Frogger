@@ -203,8 +203,8 @@ def _review_files() -> list[Path]:
 
 
 def _review_ask(parent) -> Path | None:
-    from results_review.app import choose_set
-    return choose_set(parent)
+    from results_review.app import _ask_folder
+    return _ask_folder(parent)
 
 
 def _is_review(path: Path) -> bool:
@@ -226,12 +226,15 @@ KINDS: list[Kind] = [
          "plates and bad spots.",
          "flag", _data_review_create, _data_review_files, _data_review_ask,
          _is_data_review),
-    Kind("review", "Review results", 4,
+    Kind("review", "Review results", 3,
          "Look through what a run scored, keep the winner or choose another, "
          "and correct individual spots.",
          "chart", _review_create, _review_files, _review_ask, _is_review),
 ]
 
+# Retain the implementation while hiding this workflow from the software.
+HIDDEN_KINDS = [k for k in KINDS if k.key == "data-review"]
+KINDS = [k for k in KINDS if k.key != "data-review"]
 BY_KEY: dict[str, Kind] = {k.key: k for k in KINDS}
 
 

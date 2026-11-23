@@ -124,22 +124,16 @@ def layout(sizes: dict, box: tuple, *, max_scale: float = 1.0,
 
 
 def best_montage(pieces: dict, box: tuple, **kw) -> dict:
-    """`pieces` with whichever montage -- as photographed or turned -- lets
-    `layout` show montage and graph largest in `box`.
+    """Visible panels in their recorded orientation, independent of box shape.
 
-    A 12 x 8 plate beside a wide graph leaves the box half empty; turned to
-    8 x 12 the same plate may stand beside it, or stack under it, using the
-    space. Without a turned copy, `pieces` comes back as it is.
+    Kept as the common selector for pipeline sheets and review. Previously it
+    silently chose montage_rot by available area: resizing a review pane or
+    exporting to a widescreen slide could turn the photograph. Layout may
+    change panel positions and scale, but must not change photo orientation.
+    Rotated panels in old sheets remain readable as ancillary data.
     """
-    turned = pieces.get("montage_rot")
-    base = {k: v for k, v in pieces.items()
+    return {k: v for k, v in pieces.items()
             if k not in ("montage_rot", "montage_clean", "graph_h")}
-    if turned is None:
-        return base
-    options = [base, dict(base, montage=turned)]
-    scored = [layout({k: v.size for k, v in p.items()}, box, **kw).area
-              for p in options]
-    return options[scored.index(max(scored))]
 
 
 def assemble(pieces: dict, lay: Layout):
@@ -165,8 +159,8 @@ PANEL_CHUNKS = {"montage": b"spMn", "graph": b"spGr",
                 # spot runs underneath the outline.
                 "montage_clean": b"spMc",
                 # The montage a quarter turn round, labels re-placed upright
-                # (spotting_montage.rotate_plate): the layout may use it
-                # instead when that shape fills the space better.
+                # (spotting_montage.rotate_plate). Retained for compatibility;
+                # resizing a sheet no longer selects it automatically.
                 "montage_rot": b"spMr",
                 # The graph on its side (strains down the left, upright):
                 # what the review's Rotate option shows in place of `graph`.
@@ -348,7 +342,7 @@ def _all_pieces(sheet) -> "dict | None":
 # ---------------------------------------------------------------------------
 #
 #   "fit"      montage and graph and nothing else, arranged -- side by side
-#              or stacked, the montage turned or not -- to fill the box
+#              or stacked -- to fill the box, preserving photo orientation
 #   "aligned"  the graph with every strain's replicate spots in a column
 #              directly under its name
 #
@@ -380,15 +374,19 @@ def _graph_for(pieces: dict, rotate: bool):
     return pieces["graph_h"]
 
 
-def panels_only(pieces: dict, box: tuple, rotate: bool = False):
-    """Montage and graph, as large as `box` allows, in whichever arrangement
-    and montage orientation does that best."""
+def panels_only(pieces: dict, box: tuple, rotate: bool = False,
+                with_layout: bool = False):
+    """Montage and graph fitted to `box`, preserving photo orientation.
+
+    `with_layout` also returns the Layout, so a caller can tell where the
+    montage landed: (image, Layout).
+    """
     panels = {k: pieces[k] for k in ("montage", "montage_rot") if k in pieces}
     graph = _graph_for(pieces, rotate)
     if graph is not None:
         panels["graph"] = graph
-    im, _ = arrange(best_montage(panels, box), box)
-    return im
+    im, lay = arrange(best_montage(panels, box), box)
+    return (im, lay) if with_layout else im
 
 
 def _font(size: int):
@@ -454,7 +452,7 @@ def _background(im) -> tuple:
     return (0, 0, 0)
 
 
-def _strain_strip(group: list, montage, ms: float):
+def _strain_strip(group: list, montage, ms: float, with_turn: bool = False):
     """One strain's replicates as a single upright strip, replicate 1 on top.
 
     Replicates spotted side by side are cut out together, as the one piece
@@ -463,7 +461,9 @@ def _strain_strip(group: list, montage, ms: float):
     not neighbours (other blocks, other plates) are each cut close and set
     edge to edge, so no white shows between them either.
 
-    Returns (strip, [centre y of each replicate in the strip, in rep order]).
+    Returns (strip, [centre y of each replicate in the strip, in rep order]),
+    and with `with_turn` also the quarter turn the plate was given, in
+    degrees anticlockwise -- what a spot's surroundings were rotated by.
     """
     from PIL import Image
 
@@ -497,6 +497,7 @@ def _strain_strip(group: list, montage, ms: float):
             first_left = pts[0][0] < pts[-1][0]
             strip = strip.transpose(Image.ROTATE_270 if first_left
                                     else Image.ROTATE_90)
+            turn = 270 if first_left else 90
             along = [p[0] - box[0] for p in pts]
             if not first_left:
                 along = [(box[2] - box[0]) - a for a in along]
@@ -504,10 +505,11 @@ def _strain_strip(group: list, montage, ms: float):
             first_top = pts[0][1] < pts[-1][1]
             if not first_top:
                 strip = strip.transpose(Image.ROTATE_180)
+            turn = 0 if first_top else 180
             along = [p[1] - box[1] for p in pts]
             if not first_top:
                 along = [(box[3] - box[1]) - a for a in along]
-        return strip, along
+        return (strip, along, turn) if with_turn else (strip, along)
 
     # Not neighbours: each cut to its own cell, edge to edge, on one
     # background colour so the joins do not show.
@@ -518,10 +520,13 @@ def _strain_strip(group: list, montage, ms: float):
         tile, fill = _cut(montage, (x - e, y - e, x - e + side, y - e + side),
                           clip, fill)
         strip.paste(tile, (0, i * side))
-    return strip, [e + i * side for i in range(len(pts))]
+    centres = [e + i * side for i in range(len(pts))]
+    return (strip, centres, 0) if with_turn else (strip, centres)
 
 
-def aligned(pieces: dict, extra: dict, rotate: bool = False):
+def aligned(pieces: dict, extra: dict, rotate: bool = False,
+            spots_out: "list | None" = None,
+            plates_out: "list | None" = None):
     """The graph with each strain's replicate spots next to its name.
 
     One band of plate: for each strain, its replicate spots as a continuous
@@ -531,6 +536,10 @@ def aligned(pieces: dict, extra: dict, rotate: bool = False):
     it came from. Upright, the band runs below the strain names, one column
     per strain, replicate 1 on top. `rotate` uses the sideways graph: the band
     runs down the left of the names, one row per strain, replicate 1 leftmost.
+
+    `spots_out`, when given a list, is filled with where each spot was put,
+    and `plates_out` with the box the band of plate occupies (see
+    `view_spots`).
     """
     from PIL import Image, ImageDraw
 
@@ -559,13 +568,16 @@ def aligned(pieces: dict, extra: dict, rotate: bool = False):
         by_strain.setdefault(s["strain"], []).append(s)
     if not by_strain:
         raise ViewUnavailable("no spot on this sheet belongs to a graphed strain")
-    strips = {}
+    strips, turns, members = {}, {}, {}
     for name, group in by_strain.items():
-        strip, centres = _strain_strip(group, montage, ms)
+        strip, centres, turn = _strain_strip(group, montage, ms, with_turn=True)
         if rotate:                      # replicate 1 on the left, not the top
             strip = strip.transpose(Image.ROTATE_90)
+            turn = (turn + 90) % 360
         reps = [s["rep"] for s in sorted(group, key=lambda s: s["rep"])]
         strips[name] = (strip, centres, reps)
+        turns[name] = turn
+        members[name] = sorted(group, key=lambda s: s["rep"])
 
     # Each strain's cell runs from halfway to the previous tick to halfway to
     # the next, so neighbours meet with no gap, and anything a strip does not
@@ -584,6 +596,14 @@ def aligned(pieces: dict, extra: dict, rotate: bool = False):
         strip, centres, reps = strips[name]
         span = max(1, edges[i + 1] - edges[i])
         f = span / (strip.height if rotate else strip.width)
+        if spots_out is not None:
+            # Across the strip every spot sits on its middle; along it, at
+            # its replicate centre. The band's own offset is added below,
+            # once it is known.
+            for s, c in zip(members[name], centres):
+                spots_out.append(_placed_spot(
+                    s, (span / 2, c * f) if not rotate else (c * f, span / 2),
+                    ms * f, turns[name], edges[i]))
         placed[name] = (strip.resize((max(1, round(strip.width * f)),
                                       max(1, round(strip.height * f)))
                                      if rotate else
@@ -600,8 +620,13 @@ def aligned(pieces: dict, extra: dict, rotate: bool = False):
         top = graph.height + gap
         ImageDraw.Draw(out).rectangle((band_x0, top, band_x1 - 1,
                                        top + band_h - 1), fill=agar)
+        if plates_out is not None:
+            plates_out.append((band_x0, top, band_x1, top + band_h))
         for i, name in enumerate(order):
             out.paste(placed[name][0], (edges[i], top))
+        for spot in spots_out or ():
+            spot["x"] += spot.pop("_edge", 0)
+            spot["y"] += top
         # Replicate numbers down the left, beside the band, at the replicate
         # centres of the first strain's strip.
         draw = ImageDraw.Draw(out)
@@ -621,8 +646,12 @@ def aligned(pieces: dict, extra: dict, rotate: bool = False):
     out.paste(graph, (band_w + gap, head))
     ImageDraw.Draw(out).rectangle((0, head + band_y0, band_w - 1,
                                    head + band_y1 - 1), fill=agar)
+    if plates_out is not None:
+        plates_out.append((0, head + band_y0, band_w, head + band_y1))
     for i, name in enumerate(order):
         out.paste(placed[name][0], (0, head + edges[i]))
+    for spot in spots_out or ():
+        spot["y"] += head + spot.pop("_edge", 0)
     draw = ImageDraw.Draw(out)
     _, centres, reps = placed[order[0]]
     for rep, x in zip(reps, centres):
@@ -638,17 +667,81 @@ def view(sheet, mode: str, box: tuple, rotate: bool = False):
     sheet cannot be shown that way; an older sheet without recorded pieces is
     only ever shown whole, as it was written.
     """
+    return view_spots(sheet, mode, box, rotate)[0]
+
+
+def _placed_spot(s: dict, at: tuple, k: float, turn: int,
+                 edge: float = 0.0) -> dict:
+    """Where one montage-map spot ended up in a view.
+
+    `k` is view pixels per montage-map pixel and `turn` the quarter turn its
+    surroundings were given (degrees anticlockwise), so a caller can carry
+    anything drawn relative to the spot -- its measured ROI -- into the view.
+    `mx`/`my` keep its position in the montage map itself.
+    """
+    out = {"slot": int(s["slot"]), "rep": int(s["rep"]),
+           "level": int(s.get("level", 0)), "x": float(at[0]),
+           "y": float(at[1]), "r": float(s["r"]) * k, "k": k, "turn": turn,
+           "mx": float(s["x"]), "my": float(s["y"])}
+    if edge:
+        out["_edge"] = edge
+    return out
+
+
+def _quantified(spots: list, level) -> list:
+    """The spots of the quantified level, when the sheet says which it is."""
+    if level is not None and any(s.get("level") == level for s in spots):
+        return [s for s in spots if s.get("level") == level]
+    return spots
+
+
+def _scaled(spots: list, f: float) -> list:
+    for s in spots:
+        s["x"] *= f
+        s["y"] *= f
+        s["r"] *= f
+        s["k"] *= f
+    return spots
+
+
+def view_spots(sheet, mode: str, box: tuple, rotate: bool = False):
+    """`view`, plus what is where in it: (image, spots, plates).
+
+    Each spot is a dict -- slot, rep, level, x, y (its centre, in the returned
+    image's pixels), r (half its pitch there), k, turn, mx, my (see
+    `_placed_spot`). The list is empty for a sheet that never recorded its
+    spots, which is then simply not clickable.
+
+    `plates` are the boxes (x0, y0, x1, y1) holding photographed plate, as
+    opposed to the graph and the white around it: what a brightness control
+    should touch. None when it is not known -- an older sheet shown whole.
+    """
     if mode == "stacked":               # its name before it learned to turn
         mode = "fit"
     pieces = _all_pieces(sheet)
     if pieces is None:
         if mode == "fit" and not rotate:
-            return _shrink(sheet, box)
+            return _shrink(sheet, box), [], None
         raise ViewUnavailable(
             "this sheet was drawn before its panels were recorded -- re-run "
             "the time course to get this view")
+    extra = extra_of(sheet)
+    smap = extra.get("montage_map") or {}
     if mode == "fit":
-        return panels_only(pieces, box, rotate)
+        im, lay = panels_only(pieces, box, rotate, with_layout=True)
+        spots = []
+        x0, y0, x1, _ = lay.boxes.get("montage", (0, 0, 0, 0))
+        if smap.get("spots") and smap.get("size") and x1 > x0:
+            k = (x1 - x0) / float(smap["size"][0])
+            spots = [_placed_spot(s, (x0 + s["x"] * k, y0 + s["y"] * k), k, 0)
+                     for s in _quantified(smap["spots"], extra.get("level"))]
+        plates = [tuple(lay.boxes["montage"])] if "montage" in lay.boxes else None
+        return im, spots, plates
     if mode == "aligned":
-        return _shrink(aligned(pieces, extra_of(sheet), rotate), box)
+        spots: list = []
+        plates: list = []
+        full = aligned(pieces, extra, rotate, spots_out=spots, plates_out=plates)
+        f = min(box[0] / full.width, box[1] / full.height, 1.0)
+        plates = [tuple(int(round(v * f)) for v in b) for b in plates]
+        return _shrink(full, box), _scaled(spots, f), plates
     raise ValueError(f"unknown view {mode!r}; expected one of {VIEWS}")

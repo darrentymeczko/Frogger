@@ -72,6 +72,19 @@ def test_the_toggle_button_does_not_reset_state(view, png):
     assert view.cache is not None
 
 
+def test_restoring_unchanged_redraw_reuses_cache_but_rewrite_invalidates(view,png):
+    from PIL import Image,ImageTk
+    view.show(CAND,None);view.show_updated(png);wait_image(view)
+    renders=view.cache.stats['renders']
+    view.show(OTHER,None);view.show(CAND,None);view.show_updated(png)
+    wait_image(view)
+    assert view.cache.stats['renders']==renders
+    Image.new('RGB',(8,8),'blue').save(png)
+    view.show_updated(png);wait_image(view)
+    assert view.cache.stats['renders']==renders+1
+    assert ImageTk.getimage(view._image).getpixel((0,0))[:3]==(0,0,255)
+
+
 # --- the state machine -----------------------------------------------------
 
 def test_a_new_candidate_discards_the_old_graph(view, png):
@@ -103,6 +116,16 @@ def _gridded(widget) -> bool:
     return widget.winfo_manager() != ""
 
 
+def wait_image(view):
+    """Loading is asynchronous; keep real Tk events running until it lands."""
+    import time
+    deadline = time.monotonic() + 5
+    while view._image is None and time.monotonic() < deadline:
+        view.update()
+        time.sleep(.005)
+    assert view._image is not None
+
+
 def test_the_toggle_button_is_hidden_until_there_is_a_graph(view, png):
     view.show(CAND, None)
     view.update_idletasks()
@@ -124,6 +147,7 @@ def test_the_caption_distinguishes_nonpublication_previews(view, png):
 
 def test_photo_controls_only_appear_over_an_image(view, png):
     view.show(CAND, png)
+    wait_image(view)
     view.update_idletasks()
     assert view.display_controls.winfo_manager() == ""
 
@@ -147,6 +171,7 @@ def test_photo_controls_only_reveal_in_their_top_edge_region(view, png):
     from types import SimpleNamespace
 
     view.show(CAND, png)
+    wait_image(view)
     view._photo_motion(SimpleNamespace(y=view.display_controls.winfo_reqheight()
                                        + 20))
     assert view.display_controls.winfo_manager() == ""

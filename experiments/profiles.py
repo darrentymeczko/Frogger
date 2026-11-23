@@ -388,3 +388,113 @@ def profile_from_dict(d: dict, path: str = "$") -> NamingProfile:
             for k, v in aliases.items()
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Keyword rules -- the plain-language alternative to a FacetRule
+# ---------------------------------------------------------------------------
+
+#: Which part of the relative path a keyword is looked for in.
+KEYWORD_WHERE = ("anywhere", "folder", "filename")
+
+
+@dataclass(frozen=True)
+class KeywordRule:
+    """`Photos whose folder or file name contains <text> are <facet> = <value>`.
+
+    A FacetRule reads a value OUT of a name with a regex and a path level; a
+    keyword rule needs neither. The user states the value outright and only
+    says which text identifies it, so "Gluc" can mean Glucose, "P1" plate 1,
+    "day2" 48 hours, without knowing where in the tree those words sit.
+
+    Matching is a case-insensitive substring test. For `condition` the value is
+    the condition code; for `set` the strain group key; for `plate` an int and
+    for `timepoint` hours as a float.
+    """
+
+    text: str
+    facet: str
+    value: object
+    where: str = "anywhere"
+
+    def check(self) -> None:
+        where = f"keyword rule {self.text!r}"
+        if not self.text.strip():
+            raise ProfileError("a keyword rule needs some text to look for")
+        if self.facet not in FACETS:
+            raise ProfileError(
+                f"{where}: unknown facet; expected one of {', '.join(FACETS)}"
+            )
+        if self.where not in KEYWORD_WHERE:
+            raise ProfileError(
+                f"{where}: unknown place {self.where!r}; "
+                f"expected one of {', '.join(KEYWORD_WHERE)}"
+            )
+        if self.value in (None, ""):
+            raise ProfileError(f"{where}: has no value to assign")
+        if self.facet == "plate" and (not isinstance(self.value, int)
+                                      or isinstance(self.value, bool) or self.value < 1):
+            raise ProfileError(f"{where}: plate numbers start at 1")
+        if self.facet == "timepoint" and (not isinstance(self.value, (int, float))
+                                          or isinstance(self.value, bool) or self.value < 0):
+            raise ProfileError(f"{where}: hours must be a nonnegative number")
+
+    def matches(self, parts: tuple[str, ...]) -> bool:
+        if not parts:
+            return False
+        if self.where == "filename":
+            haystack = parts[-1]
+        elif self.where == "folder":
+            haystack = "/".join(parts[:-1])
+        else:
+            haystack = "/".join(parts)
+        return self.text.strip().casefold() in haystack.casefold()
+
+
+def apply_keywords(parts: tuple[str, ...], rules) -> dict:
+    """Facet -> value for every keyword rule that matches this path.
+
+    When several rules for one facet match, the longest keyword wins, so
+    "Glucose + H2O2" beats "Glucose" without the user having to order them;
+    equal lengths go to the rule listed first.
+    """
+    out: dict = {}
+    best: dict[str, int] = {}
+    for rule in rules:
+        if not rule.matches(parts):
+            continue
+        length = len(rule.text.strip())
+        if length <= best.get(rule.facet, -1):
+            continue
+        best[rule.facet] = length
+        out[rule.facet] = rule.value
+        if rule.facet == "timepoint":
+            out["timepoint_label"] = f"{float(rule.value):g} Hours"
+    return out
+
+
+def keyword_to_dict(rule: KeywordRule) -> dict:
+    return {"text": rule.text, "facet": rule.facet, "value": rule.value, "where": rule.where}
+
+
+def keyword_from_dict(d: dict, path: str) -> KeywordRule:
+    if not isinstance(d, dict):
+        raise ProfileError(f"{path}: expected an object, got {type(d).__name__}")
+    try:
+        facet = str(d["facet"])
+        value = d["value"]
+        if facet == "plate" and isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = int(value)
+        elif facet == "timepoint" and isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = float(value)
+        elif facet in ("condition", "set"):
+            value = str(value)
+        rule = KeywordRule(text=str(d["text"]), facet=facet, value=value,
+                           where=str(d.get("where", "anywhere")))
+    except KeyError as exc:
+        raise ProfileError(f"{path}: missing required key {exc.args[0]!r}") from exc
+    try:
+        rule.check()
+    except ProfileError as exc:
+        raise ProfileError(f"{path}: {exc}") from exc
+    return rule
